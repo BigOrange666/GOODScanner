@@ -10,7 +10,7 @@ use crate::ocr::paddle_paddle_model::preprocess::resize_img;
 use crate::positioning::Shape3D;
 use crate::utils::read_file_to_string;
 #[cfg(feature = "ort")]
-use ort::GraphOptimizationLevel;
+use ort::{session::{Session, builder::GraphOptimizationLevel}, value::Value};
 #[cfg(feature = "tract_onnx")]
 use tract_onnx::prelude::*;
 #[cfg(feature = "tract_onnx")]
@@ -29,7 +29,7 @@ pub struct PPOCRModel {
     #[cfg(feature = "tract_onnx")]
     model: ModelType,
     #[cfg(feature = "ort")]
-    model: ort::Session,
+    model: RefCell<Session>,
 
     inference_count: RefCell<usize>,
     inference_time: RefCell<Duration>,
@@ -52,9 +52,9 @@ impl PPOCRModel {
         let index_to_word = parse_index_to_word(&words_str, true);
 
         #[cfg(feature = "ort")]
-        let model = ort::Session::builder()?
+        let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(4)?
+            .with_intra_threads(num_cpus::get())?
             .commit_from_file(onnx_file)?;
 
         #[cfg(feature = "tract_onnx")]
@@ -71,6 +71,9 @@ impl PPOCRModel {
 
         Ok(Self {
             index_to_word,
+            #[cfg(feature = "ort")]
+            model: RefCell::new(session),
+            #[cfg(feature = "tract_onnx")]
             model,
             inference_count: RefCell::new(0),
             inference_time: RefCell::new(Duration::new(0, 0)),
@@ -79,9 +82,9 @@ impl PPOCRModel {
 
     pub fn new(onnx: &[u8], index_to_word: Vec<String>) -> Result<Self> {
         #[cfg(feature = "ort")]
-        let model = ort::Session::builder()?
+        let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(4)?
+            .with_intra_threads(num_cpus::get())?
             .commit_from_memory(onnx)?;
 
         #[cfg(feature = "tract_onnx")]
@@ -98,6 +101,9 @@ impl PPOCRModel {
 
         Ok(Self {
             index_to_word,
+            #[cfg(feature = "ort")]
+            model: RefCell::new(session),
+            #[cfg(feature = "tract_onnx")]
             model,
             inference_count: RefCell::new(0),
             inference_time: RefCell::new(Duration::new(0, 0)),
@@ -119,7 +125,16 @@ impl ImageToText<RgbImage> for PPOCRModel {
     fn image_to_text(&self, image: &RgbImage, _is_preprocessed: bool) -> Result<String> {
         let start_time = SystemTime::now();
 
-        let resized_image = resize_img(Shape3D::new(3, 48, 320), image);
+        // log::info!("========== [OCR调试] 开始新的识别 ==========");
+        // log::info!("[OCR调试] 原始图像尺寸: {}x{}", image.width(), image.height());
+        // If image is already preprocessed (fixed size for model), skip resize.
+        let resized_image = if _is_preprocessed {
+            // Assume caller provided an image already sized to model input (H=48, W=320)
+            image.clone()
+        } else {
+            resize_img(Shape3D::new(3, 48, 320), image)
+        };
+        // log::info!("[OCR调试] 缩放后图像尺寸: {}x{}", resized_image.width(), resized_image.height());
 
         #[cfg(feature = "ort")]
         let tensor = normalize_image_to_ndarray(&resized_image);
@@ -127,24 +142,71 @@ impl ImageToText<RgbImage> for PPOCRModel {
         let tensor = normalize_image_to_tensor(&resized_image);
 
         #[cfg(feature = "ort")]
-        let result = self.model.run(ort::inputs![tensor]?)?;
+        {
+            // log::info!("[OCR调试] 张量形状: {:?}", tensor.shape());
+            // let first_pixel = resized_image.get_pixel(0, 0);
+            // log::info!("[OCR调试] 第一个像素 RGB: [{}, {}, {}]", first_pixel[0], first_pixel[1], first_pixel[2]);
+            // // 打印张量前几个值
+            // let mut first_vals = Vec::new();
+            // for i in 0..5.min(tensor.shape()[3]) {
+            //     first_vals.push(tensor[[0, 0, 0, i]]);
+            // }
+            // log::info!("[OCR调试] 张量前几个值 (C=0): {:?}", first_vals);
+        }
+        
+        #[cfg(feature = "ort")]
+        let tensor_value = Value::from_array(tensor)?;
+        #[cfg(feature = "ort")]
+        let mut model_borrow = self.model.borrow_mut();
+        #[cfg(feature = "ort")]
+        let result = model_borrow.run(ort::inputs![tensor_value])?;
         #[cfg(feature = "tract_onnx")]
         let result = self.model.run(tvec!(tensor.into()))?;
 
         #[cfg(feature = "ort")]
-        let arr = result[0].try_extract_tensor()?;
+        let (shape, data) = result[0].try_extract_tensor::<f32>()?;
         #[cfg(feature = "tract_onnx")]
         let arr = result[0].to_array_view::<f32>()?;
 
-        let shape = arr.shape();
-        // println!("{:?}", shape);
+        #[cfg(feature = "ort")]
+        let shape_dims = shape.as_ref();
+        #[cfg(feature = "tract_onnx")]
+        let shape_dims = arr.shape();
+        // println!("{:?}", shape_dims);
 
-        let mut text_index = Vec::new();
+        let mut text_index: Vec<usize> = Vec::new();
 
-        for i in 0..shape[1] {
+        #[cfg(feature = "ort")]
+        for i in 0..(shape_dims[1] as usize) {
             let mut max_index = 0;
             let mut max_value = -f32::INFINITY;
-            for j in 0..shape[2] {
+            for j in 0..(shape_dims[2] as usize) {
+                // 数据是线性存储的，索引计算: [0, i, j] = i * shape[2] + j
+                let idx = i * (shape_dims[2] as usize) + j;
+                let value = data[idx];
+                if value > max_value {
+                    max_value = value;
+                    max_index = j;
+                }
+            }
+            text_index.push(max_index);
+        }
+        
+        #[cfg(feature = "ort")]
+        {
+            // log::info!("[OCR调试] 输出形状: {:?}", shape_dims);
+            // log::info!("[OCR调试] 预测索引序列: {:?}", text_index);
+            // log::info!("[OCR调试] 预测索引序列前10个: {:?}", &text_index[..text_index.len().min(10)]);
+        }
+        #[cfg(feature = "tract_onnx")]
+        {
+            // log::info!("[OCR调试] 预测索引序列前10个: {:?}", &text_index[..text_index.len().min(10)]);
+        }
+        #[cfg(feature = "tract_onnx")]
+        for i in 0..shape_dims[1] {
+            let mut max_index = 0;
+            let mut max_value = -f32::INFINITY;
+            for j in 0..shape_dims[2] {
                 let value = arr[[0, i, j]];
                 // println!("{}", value);
                 if value > max_value {
@@ -155,20 +217,38 @@ impl ImageToText<RgbImage> for PPOCRModel {
             text_index.push(max_index);
         }
 
-        let mut indices = Vec::new();
-        if text_index[0] != 0 {
-            indices.push(text_index[0]);
-        }
-        for i in 1..text_index.len() {
-            if text_index[i] != text_index[i - 1] && text_index[i] != 0 {
-                indices.push(text_index[i]);
-            }
-        }
-
+        // CTC 解码：与 Python 代码逻辑一致
         let mut s = String::new();
-        for &index in indices.iter() {
-            s.push_str(&self.index_to_word[index - 1]);
+        let mut last_index: i32 = -1;
+        let mut out_of_bounds_count = 0;
+        
+        for (_pos, &index) in text_index.iter().enumerate() {
+            // 如果当前索引不为0且与上一个索引不同，则添加到结果
+            if index != 0 && (index as i32) != last_index {
+                // index 是从 1 开始的，所以访问 index_to_word[index - 1]
+                // 有效范围: index ∈ [1, index_to_word.len()]
+                if index == 0 || (index as usize) > self.index_to_word.len() {
+                    out_of_bounds_count += 1;
+                    if out_of_bounds_count == 1 {
+                        // 只在第一次越界时记录详细信息
+                        log::warn!("PaddleOCR 索引越界: index={}, 有效范围=[1, {}], 位置={}, 已跳过该字符", 
+                                   index, self.index_to_word.len(), _pos);
+                    }
+                } else {
+                    let ch = &self.index_to_word[index - 1];
+                    // log::info!("[OCR调试] 位置 {}: 索引 {} -> '{}'", _pos, index, ch);
+                    s.push_str(ch);
+                }
+            }
+            // 总是更新 last_index（包括0）
+            last_index = index as i32;
         }
+        
+        if out_of_bounds_count > 0 {
+            log::warn!("PaddleOCR 本次识别共有 {} 个字符索引越界被跳过，最终识别结果: '{}'", out_of_bounds_count, s);
+        }
+        
+        // log::info!("[OCR调试] 最终识别结果: {}", s);
 
         // println!("{:?}", text_index);
 

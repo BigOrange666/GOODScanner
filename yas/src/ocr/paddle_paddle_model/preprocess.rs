@@ -20,6 +20,11 @@ pub fn resize_img(rec_image_shape: Shape3D<u32>, img: &RgbImage) -> RgbImage {
     resized_image
 }
 
+/// Resize to a fixed (width, height). This matches Python's cv2.resize((width, height)).
+pub fn resize_to_fixed(target_width: u32, target_height: u32, img: &RgbImage) -> RgbImage {
+    resize(img, target_width, target_height, FilterType::Triangle)
+}
+
 #[cfg(feature = "ort")]
 pub fn normalize_image_to_ndarray(img: &RgbImage) -> ndarray::Array4<f32> {
     let height = img.height() as usize;

@@ -1,3 +1,10 @@
+/// OCR后端类型
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OcrBackend {
+    Yas,
+    Paddle,
+}
+
 #[derive(Clone, clap::Args)]
 pub struct GenshinArtifactScannerConfig {
     /// Items with stars less than this will be ignored
@@ -19,4 +26,20 @@ pub struct GenshinArtifactScannerConfig {
     /// the exact amount to scan
     #[arg(id = "number", long, help = "指定圣遗物数量", value_name = "NUMBER", default_value_t = -1)]
     pub number: i32,
+
+    /// save captured images for debugging
+    #[arg(id = "save-images", long = "save-images", help = "保存识别的图片到当前目录用于调试")]
+    pub save_images: bool,
+
+    /// 选择OCR后端: yas 或 paddle
+    #[arg(long, help = "选择OCR后端: yas 或 paddle", default_value = "yas")]
+    pub ocr_backend: String,
+
+    /// 副词条4单独指定OCR后端: yas 或 paddle，留空则与 ocr_backend 一致
+    #[arg(long, help = "副词条4单独指定OCR后端: yas 或 paddle，留空则与 ocr_backend 一致", default_value = "paddlev3")]
+    pub substat4_ocr_backend: String,
+
+    /// 每次切换圣遗物后的额外等待时间(ms)
+    #[arg(id = "delay", long, help = "每次切换圣遗物后的额外等待时间(ms)", default_value_t = 50)]
+    pub delay: u32,
 }
