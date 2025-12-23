@@ -41,7 +41,7 @@ pub struct GenshinArtifactScanner {
 }
 
 impl GenshinArtifactScanner {
-    pub const MAX_COUNT: usize = 2100;
+    pub const MAX_COUNT: usize = 2400;
 }
 
 // constructor
@@ -243,6 +243,10 @@ impl GenshinArtifactScanner {
             let pinned_generator = Pin::new(&mut generator);
             match pinned_generator.resume(()) {
                 CoroutineState::Yielded(_) => {
+                    if self.scanner_config.delay > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(self.scanner_config.delay as u64));
+                    }
+
                     let image = self.capture_panel().unwrap();
                     let star = self.get_star().unwrap();
 

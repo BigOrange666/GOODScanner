@@ -96,6 +96,8 @@ pub enum ArtifactSetName {
     ObsidianCodex,
     LongNightsOath,
     FinaleOfTheDeepGalleries,
+    SpinMoonSerenade,
+    RealmMirrorNight,
 }
 
 #[derive(Debug, Clone)]
@@ -219,12 +221,17 @@ impl TryFrom<&GenshinArtifactScanResult> for GenshinArtifact {
         let sub3 = ArtifactStat::from_zh_cn_raw(&value.sub_stat[2]);
         let sub4 = ArtifactStat::from_zh_cn_raw(&value.sub_stat[3]);
 
-        let equip = if value.equip.ends_with("已装备") {
-            let chars = value.equip.chars().collect::<Vec<_>>();
-            let equip_name = chars[..chars.len() - 3].iter().collect::<String>();
+        // 处理装备者字符串：去掉尾部的 "已装备"，进行别名归一化，然后校验是否为已知角色名
+        let equip = if let Some(stripped) = value.equip.strip_suffix("已装备") {
+            let equip_name_raw = stripped.trim();
+            // 先使用别名映射（例如 OCR 将 柯莱 误识为 柯菜）进行归一化
+            let equip_name_norm = crate::character::CHARACTER_ALIASES
+                .get(equip_name_raw)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| equip_name_raw.to_string());
 
-            if CHARACTER_NAMES.contains(equip_name.as_str()) {
-                Some(equip_name)
+            if CHARACTER_NAMES.contains(equip_name_norm.as_str()) {
+                Some(equip_name_norm)
             } else {
                 None
             }
@@ -251,7 +258,8 @@ impl TryFrom<&GenshinArtifactScanResult> for GenshinArtifact {
 impl ArtifactSetName {
     #[rustfmt::skip]
     pub fn from_zh_cn(s: &str) -> Option<ArtifactSetName> {
-        match s {
+        let s = s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        match s.as_str() {
             "磐陀裂生之花" => Some(ArtifactSetName::ArchaicPetra),
             "嵯峨群峰之翼" => Some(ArtifactSetName::ArchaicPetra),
             "星罗圭壁之晷" => Some(ArtifactSetName::ArchaicPetra),
@@ -290,7 +298,7 @@ impl ArtifactSetName {
             "渡火者的醒悟" => Some(ArtifactSetName::LavaWalker),
             "渡火者的智慧" => Some(ArtifactSetName::LavaWalker),
             "远方的少女之心" => Some(ArtifactSetName::MaidenBeloved),
-            "少女飘摇的思念" => Some(ArtifactSetName::MaidenBeloved),
+            "少女飘摇的思念" | "少女飄搖的思念" | "少女飘搖的思念" => Some(ArtifactSetName::MaidenBeloved),
             "少女苦短的良辰" => Some(ArtifactSetName::MaidenBeloved),
             "少女片刻的闲暇" => Some(ArtifactSetName::MaidenBeloved),
             "少女易逝的芳颜" => Some(ArtifactSetName::MaidenBeloved),
@@ -310,10 +318,10 @@ impl ArtifactSetName {
             "平雷之器" => Some(ArtifactSetName::ThunderSmoother),
             "平雷之冠" => Some(ArtifactSetName::ThunderSmoother),
             "雷鸟的怜悯" => Some(ArtifactSetName::ThunderingFury),
-            "雷灾的孑遗" => Some(ArtifactSetName::ThunderingFury),
+            "雷灾的孑遗" | "雷灾的子遗" => Some(ArtifactSetName::ThunderingFury),
             "雷霆的时计" => Some(ArtifactSetName::ThunderingFury),
             "降雷的凶兆" => Some(ArtifactSetName::ThunderingFury),
-            "唤雷的头冠" => Some(ArtifactSetName::ThunderingFury),
+            "唤雷的头冠" | "喚雷的头冠" => Some(ArtifactSetName::ThunderingFury),
             "野花记忆的绿野" => Some(ArtifactSetName::ViridescentVenerer),
             "猎人青翠的箭羽" => Some(ArtifactSetName::ViridescentVenerer),
             "翠绿猎人的笃定" => Some(ArtifactSetName::ViridescentVenerer),
@@ -368,7 +376,7 @@ impl ArtifactSetName {
             "归乡之羽" => Some(ArtifactSetName::ResolutionOfSojourner),
             "逐光之石" => Some(ArtifactSetName::ResolutionOfSojourner),
             "异国之盏" => Some(ArtifactSetName::ResolutionOfSojourner),
-            "感别之冠" => Some(ArtifactSetName::ResolutionOfSojourner),
+            "感别之冠" | "感別之冠" => Some(ArtifactSetName::ResolutionOfSojourner),
             "学士的书签" => Some(ArtifactSetName::Scholar),
             "学士的羽笔" => Some(ArtifactSetName::Scholar),
             "学士的时钟" => Some(ArtifactSetName::Scholar),
@@ -420,28 +428,32 @@ impl ArtifactSetName {
             "梦醒之瓢" => Some(ArtifactSetName::HuskOfOpulentDreams),
             "形骸之笠" => Some(ArtifactSetName::HuskOfOpulentDreams),
             "海染之花" => Some(ArtifactSetName::OceanHuedClam),
-            "渊宫之羽" => Some(ArtifactSetName::OceanHuedClam),
-            "离别之贝" => Some(ArtifactSetName::OceanHuedClam),
+            "渊宫之羽" | "渊宮之羽" => Some(ArtifactSetName::OceanHuedClam),
+            "离别之贝" | "离別之贝" => Some(ArtifactSetName::OceanHuedClam),
             "真珠之笼" => Some(ArtifactSetName::OceanHuedClam),
             "海祇之冠" => Some(ArtifactSetName::OceanHuedClam),
             "生灵之华" | "阳辔之遗" | "潜光片羽" | "结契之刻" | "虺雷之姿" => Some(ArtifactSetName::VermillionHereafter),
             "魂香之花" | "祝祀之凭" | "垂玉之叶" | "涌泉之盏" | "浮溯之珏" => Some(ArtifactSetName::EchoesOfAnOffering),
-            "迷宫的游人" | "翠蔓的智者" | "贤智的定期" | "迷误者之灯" | "月桂的宝冠" => Some(ArtifactSetName::DeepwoodMemories),
+            "迷宫的游人" | "迷宮的游人" | "翠蔓的智者" | "贤智的定期" | "迷误者之灯" | "月桂的宝冠" => Some(ArtifactSetName::DeepwoodMemories),
             "梦中的铁花" | "裁断的翎羽" | "沉金的岁月" | "如蜜的终宴" | "沙王的投影" => Some(ArtifactSetName::GildedDreams),
             "月女的华彩" | "谢落的筵席" | "凝结的时刻" | "守秘的魔瓶" | "紫晶的花冠" => Some(ArtifactSetName::FlowerOfParadiseLost),
             "众王之都的开端" | "黄金邦国的结末" | "失落迷途的机芯" | "迷醉长梦的守护" | "流沙贵嗣的遗宝" => Some(ArtifactSetName::DesertPavilionChronicle),
-            "恶龙的单片镜" | "坏巫师的羽杖" | "旅途中的鲜花" | "水仙的时时刻刻" | "勇者们的茶会" => Some(ArtifactSetName::NymphsDream),
+            "恶龙的单片镜" | "坏巫师的羽杖" | "旅途中的鲜花" | "旅途中的鮮花" | "水仙的时时刻刻" | "勇者们的茶会" => Some(ArtifactSetName::NymphsDream),
             "灵光明烁之心" | "琦色灵彩之羽" | "灵光源起之蕊" | "久远花落之时" | "无边酣乐之筵" => Some(ArtifactSetName::VourukashasGlow),
-            "猎人的胸花" | "杰作的序曲" | "裁判的时刻" | "遗忘的容器" | "老兵的容颜" => Some(ArtifactSetName::MarechausseeHunter),
-            "黄金乐曲的变奏" | "黄金飞鸟的落羽" | "黄金时代的先声" | "黄金之夜的喧嚣" | "黄金剧团的奖赏" => Some(ArtifactSetName::GoldenTroupe),
+            "猎人的胸花" | "杰作的序曲" | "傑作的序曲" | "裁判的时刻" | "遗忘的容器" | "老兵的容颜" => Some(ArtifactSetName::MarechausseeHunter),
+            "黄金乐曲的变奏" | "黃金乐曲的变奏" | "黄金飞鸟的落羽" | "黃金飞鸟的落羽" | "黄金时代的先声" | "黃金时代的先声" | "黄金之夜的喧嚣" | "黄金之夜的喧器" | "黃金之夜的喧嚣" | "黃金之夜的喧器" | "黄金剧团的奖赏" | "黃金剧团的奖賞" => Some(ArtifactSetName::GoldenTroupe),
             "昔时传奏之诗" | "昔时浮想之思" | "昔时遗落之誓" | "昔时回映之音" | "昔时应许之梦" => Some(ArtifactSetName::SongOfDaysPast),
             "慈爱的淑女帽" | "诚恳的蘸水笔" | "无私的妆饰花" | "忠实的砂时计" | "慷慨的墨水瓶" => Some(ArtifactSetName::NighttimeWhispersInTheEchoingWoods),
-            "异想零落的圆舞" | "古海玄幽的夜想" | "谐律交响的前奏" | "命途轮转的谐谑" | "灵露倾洒的狂诗" => Some(ArtifactSetName::FragmentOfHarmonicWhimsy),
+            "异想零落的圆舞" | "異想零落的圆舞" | "古海玄幽的夜想" | "谐律交响的前奏" | "命途轮转的谐谑" | "灵露倾洒的狂诗" => Some(ArtifactSetName::FragmentOfHarmonicWhimsy),
             "失冕的宝冠" | "褪光的翠尾" | "暗结的明花" | "举业的识刻" | "筹谋的共樽" => Some(ArtifactSetName::UnfinishedReverie),
             "魔战士的羽面" | "巡山客的信标" | "驯兽师的护符" | "秘术家的金盘" | "游学者的爪杯" => Some(ArtifactSetName::ScrollOfTheHeroOfCinderCity),
-            "诸圣的礼冠" | "灵髓的根脉" | "异种的期许" | "夜域的迷思" | "纷争的前宴" => Some(ArtifactSetName::ObsidianCodex),
+            "诸圣的礼冠" | "灵髓的根脉" | "灵髓的根脈" | "异种的期许" | "異种的期许" | "夜域的迷思" | "纷争的前宴" => Some(ArtifactSetName::ObsidianCodex),
             "深廊的遂失之冕" | "深廊的漫远之约" | "深廊的回奏之歌" | "深廊的湮落之刻" | "深廊的饫赐之宴" => Some(ArtifactSetName::FinaleOfTheDeepGalleries),
             "被浸染的缨盔" | "夜鸣莺的尾羽" | "执灯人的誓词" | "不死者的哀铃" | "未吹响的号角" => Some(ArtifactSetName::LongNightsOath),
+            // 纺月的夜歌
+            "流离者的晶泪" | "流离者的晶淚" | "受福者的白羽" | "祭霜者的迷狂" | "至纯者的欢荣" | "司信者的圣冕" => Some(ArtifactSetName::SpinMoonSerenade),
+            // 穹境示现之夜
+            "渴真之花" | "深罪之羽" | "谕告之钟" | "满溢之壶" | "永劫之冕" => Some(ArtifactSetName::RealmMirrorNight),
             _ => None,
         }
     }
@@ -449,7 +461,20 @@ impl ArtifactSetName {
 
 impl ArtifactSlot {
     pub fn from_zh_cn(s: &str) -> Option<ArtifactSlot> {
-        match s {
+        let s = s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        match s.as_str() {
+            // 纺月的夜歌
+            "流离者的晶泪" | "流离者的晶淚" => Some(ArtifactSlot::Flower),
+            "受福者的白羽" => Some(ArtifactSlot::Feather),
+            "祭霜者的迷狂" => Some(ArtifactSlot::Sand),
+            "至纯者的欢荣" => Some(ArtifactSlot::Goblet),
+            "司信者的圣冕" => Some(ArtifactSlot::Head),
+            // 穹境示现之夜
+            "渴真之花" => Some(ArtifactSlot::Flower),
+            "深罪之羽" => Some(ArtifactSlot::Feather),
+            "谕告之钟" => Some(ArtifactSlot::Sand),
+            "满溢之壶" => Some(ArtifactSlot::Goblet),
+            "永劫之冕" => Some(ArtifactSlot::Head),
             "磐陀裂生之花" => Some(ArtifactSlot::Flower),
             "嵯峨群峰之翼" => Some(ArtifactSlot::Feather),
             "星罗圭壁之晷" => Some(ArtifactSlot::Sand),
@@ -487,7 +512,7 @@ impl ArtifactSlot {
             "渡火者的醒悟" => Some(ArtifactSlot::Goblet),
             "渡火者的智慧" => Some(ArtifactSlot::Head),
             "远方的少女之心" => Some(ArtifactSlot::Flower),
-            "少女飘摇的思念" => Some(ArtifactSlot::Feather),
+            "少女飘摇的思念" | "少女飄搖的思念" | "少女飘搖的思念" => Some(ArtifactSlot::Feather),
             "少女苦短的良辰" => Some(ArtifactSlot::Sand),
             "少女片刻的闲暇" => Some(ArtifactSlot::Goblet),
             "少女易逝的芳颜" => Some(ArtifactSlot::Head),
@@ -507,10 +532,10 @@ impl ArtifactSlot {
             "平雷之器" => Some(ArtifactSlot::Goblet),
             "平雷之冠" => Some(ArtifactSlot::Head),
             "雷鸟的怜悯" => Some(ArtifactSlot::Flower),
-            "雷灾的孑遗" => Some(ArtifactSlot::Feather),
+            "雷灾的孑遗" | "雷灾的子遗" => Some(ArtifactSlot::Feather),
             "雷霆的时计" => Some(ArtifactSlot::Sand),
             "降雷的凶兆" => Some(ArtifactSlot::Goblet),
-            "唤雷的头冠" => Some(ArtifactSlot::Head),
+            "唤雷的头冠" | "喚雷的头冠" => Some(ArtifactSlot::Head),
             "野花记忆的绿野" => Some(ArtifactSlot::Flower),
             "猎人青翠的箭羽" => Some(ArtifactSlot::Feather),
             "翠绿猎人的笃定" => Some(ArtifactSlot::Sand),
@@ -565,7 +590,7 @@ impl ArtifactSlot {
             "归乡之羽" => Some(ArtifactSlot::Feather),
             "逐光之石" => Some(ArtifactSlot::Sand),
             "异国之盏" => Some(ArtifactSlot::Goblet),
-            "感别之冠" => Some(ArtifactSlot::Head),
+            "感别之冠" | "感別之冠" => Some(ArtifactSlot::Head),
             "学士的书签" => Some(ArtifactSlot::Flower),
             "学士的羽笔" => Some(ArtifactSlot::Feather),
             "学士的时钟" => Some(ArtifactSlot::Sand),
@@ -617,8 +642,8 @@ impl ArtifactSlot {
             "梦醒之瓢" => Some(ArtifactSlot::Goblet),
             "形骸之笠" => Some(ArtifactSlot::Head),
             "海染之花" => Some(ArtifactSlot::Flower),
-            "渊宫之羽" => Some(ArtifactSlot::Feather),
-            "离别之贝" => Some(ArtifactSlot::Sand),
+            "渊宫之羽" | "渊宮之羽" => Some(ArtifactSlot::Feather),
+            "离别之贝" | "离別之贝" => Some(ArtifactSlot::Sand),
             "真珠之笼" => Some(ArtifactSlot::Goblet),
             "海祇之冠" => Some(ArtifactSlot::Head),
             "生灵之华" => Some(ArtifactSlot::Flower),
@@ -632,6 +657,7 @@ impl ArtifactSlot {
             "涌泉之盏" => Some(ArtifactSlot::Goblet),
             "浮溯之珏" => Some(ArtifactSlot::Head),
             "迷宫的游人" => Some(ArtifactSlot::Flower),
+            "迷宮的游人" => Some(ArtifactSlot::Flower),
             "翠蔓的智者" => Some(ArtifactSlot::Feather),
             "贤智的定期" => Some(ArtifactSlot::Sand),
             "迷误者之灯" => Some(ArtifactSlot::Goblet),
@@ -651,7 +677,7 @@ impl ArtifactSlot {
             "失落迷途的机芯" => Some(ArtifactSlot::Sand),
             "迷醉长梦的守护" => Some(ArtifactSlot::Goblet),
             "流沙贵嗣的遗宝" => Some(ArtifactSlot::Head),
-            "旅途中的鲜花" => Some(ArtifactSlot::Flower),
+            "旅途中的鲜花" | "旅途中的鮮花" => Some(ArtifactSlot::Flower),
             "坏巫师的羽杖" => Some(ArtifactSlot::Feather),
             "水仙的时时刻刻" => Some(ArtifactSlot::Sand),
             "勇者们的茶会" => Some(ArtifactSlot::Goblet),
@@ -662,15 +688,15 @@ impl ArtifactSlot {
             "无边酣乐之筵" => Some(ArtifactSlot::Goblet),
             "灵光明烁之心" => Some(ArtifactSlot::Head),
             "猎人的胸花" => Some(ArtifactSlot::Flower),
-            "杰作的序曲" => Some(ArtifactSlot::Feather),
+            "杰作的序曲" | "傑作的序曲" => Some(ArtifactSlot::Feather),
             "裁判的时刻" => Some(ArtifactSlot::Sand),
             "遗忘的容器" => Some(ArtifactSlot::Goblet),
             "老兵的容颜" => Some(ArtifactSlot::Head),
-            "黄金乐曲的变奏" => Some(ArtifactSlot::Flower),
-            "黄金飞鸟的落羽" => Some(ArtifactSlot::Feather),
-            "黄金时代的先声" => Some(ArtifactSlot::Sand),
-            "黄金之夜的喧嚣" => Some(ArtifactSlot::Goblet),
-            "黄金剧团的奖赏" => Some(ArtifactSlot::Head),
+            "黄金乐曲的变奏" | "黃金乐曲的变奏" => Some(ArtifactSlot::Flower),
+            "黄金飞鸟的落羽" | "黃金飞鸟的落羽" => Some(ArtifactSlot::Feather),
+            "黄金时代的先声" | "黃金时代的先声" => Some(ArtifactSlot::Sand),
+            "黄金之夜的喧嚣" | "黃金之夜的喧嚣" | "黃金之夜的喧器" | "黄金之夜的喧器" => Some(ArtifactSlot::Goblet),
+            "黄金剧团的奖赏" | "黃金剧团的奖賞" => Some(ArtifactSlot::Head),
             "昔时遗落之誓" => Some(ArtifactSlot::Flower),
             "昔时浮想之思" => Some(ArtifactSlot::Feather),
             "昔时回映之音" => Some(ArtifactSlot::Sand),
@@ -681,7 +707,7 @@ impl ArtifactSlot {
             "忠实的砂时计" => Some(ArtifactSlot::Sand),
             "慷慨的墨水瓶" => Some(ArtifactSlot::Goblet),
             "慈爱的淑女帽" => Some(ArtifactSlot::Head),
-            "异想零落的圆舞" => Some(ArtifactSlot::Head),
+            "异想零落的圆舞"  | "異想零落的圆舞" => Some(ArtifactSlot::Head),
             "古海玄幽的夜想" => Some(ArtifactSlot::Feather),
             "谐律交响的前奏" => Some(ArtifactSlot::Flower),
             "命途轮转的谐谑" => Some(ArtifactSlot::Sand),
@@ -697,8 +723,8 @@ impl ArtifactSlot {
             "秘术家的金盘" => Some(ArtifactSlot::Sand),
             "游学者的爪杯" => Some(ArtifactSlot::Goblet),
             "诸圣的礼冠" => Some(ArtifactSlot::Head),
-            "灵髓的根脉" => Some(ArtifactSlot::Feather),
-            "异种的期许" => Some(ArtifactSlot::Flower),
+            "灵髓的根脉" | "灵髓的根脈" => Some(ArtifactSlot::Feather),
+            "异种的期许" | "異种的期许" => Some(ArtifactSlot::Flower),
             "夜域的迷思" => Some(ArtifactSlot::Sand),
             "纷争的前宴" => Some(ArtifactSlot::Goblet),
             "被浸染的缨盔" => Some(ArtifactSlot::Head),

@@ -141,6 +141,8 @@ impl ArtifactSetName {
             ArtifactSetName::ObsidianCodex => "obsidian_codex",
             ArtifactSetName::FinaleOfTheDeepGalleries => "finale_of_the_deep_galleries",
             ArtifactSetName::LongNightsOath => "long_nights_oath",
+            ArtifactSetName::SpinMoonSerenade => "spin_moon_serenade",
+            ArtifactSetName::RealmMirrorNight => "realm_mirror_night",
 
             // Not supported by Mingyulab
             ArtifactSetName::Adventurer => unreachable!(),

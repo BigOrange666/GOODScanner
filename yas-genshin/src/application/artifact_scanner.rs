@@ -37,6 +37,7 @@ impl ArtifactScannerApplication {
             "../../window_info/windows1280x960.json",
             "../../window_info/windows1440x900.json",
             "../../window_info/windows2100x900.json",
+            "../../window_info/windows2560x1440.json",
             "../../window_info/windows3440x1440.json",
         )
     }

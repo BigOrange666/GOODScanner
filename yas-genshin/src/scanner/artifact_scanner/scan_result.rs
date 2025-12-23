@@ -8,4 +8,5 @@ pub struct GenshinArtifactScanResult {
     pub level: i32,
     pub star: i32,
     pub lock: bool,
+    pub index: usize,  // 圣遗物扫描顺序索引
 }
