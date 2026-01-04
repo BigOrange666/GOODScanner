@@ -1,4 +1,5 @@
-use std::{cell::RefCell, time::Duration};
+use std::sync::Mutex;
+use std::time::Duration;
 use std::time::SystemTime;
 use image::{EncodableLayout, GrayImage, ImageBuffer, Luma, RgbImage};
 // use tract_onnx::prelude::*;
@@ -16,32 +17,22 @@ type ModelType = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box
 
 pub struct YasOCRModel {
     #[cfg(feature = "ort")]
-    model: RefCell<Session>,
+    model: Mutex<Session>,
     #[cfg(feature = "tract_onnx")]
     model: ModelType,
     index_to_word: Vec<String>,
-
-    inference_time: RefCell<Duration>,   // in seconds
-    invoke_count: RefCell<usize>,
 }
 
 impl YasOCRModel {
     pub fn get_average_inference_time(&self) -> Option<Duration> {
-        let count = *self.invoke_count.borrow();
-        let total_time = *self.inference_time.borrow();
-        
-        if count == 0 {
-            None
-        } else {
-            Some(total_time.div_f64(count as f64))
-        }
+        None
     }
 
     pub fn new(model_bytes: &[u8], content: &str) -> Result<YasOCRModel> {
         #[cfg(feature = "ort")]
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(4)?
+            .with_intra_threads(1)?
             .commit_from_memory(model_bytes)?;
         #[cfg(feature = "tract_onnx")]
         let model = tract_onnx::onnx()
@@ -65,18 +56,14 @@ impl YasOCRModel {
 
         Ok(YasOCRModel {
             #[cfg(feature = "ort")]
-            model: RefCell::new(session),
+            model: Mutex::new(session),
             #[cfg(feature = "tract_onnx")]
             model,
             index_to_word,
-            inference_time: RefCell::new(Duration::new(0, 0)),
-            invoke_count: RefCell::new(0),
         })
     }
 
     pub fn inference_string(&self, img: &ImageBuffer<Luma<f32>, Vec<f32>>) -> Result<String> {
-        let now = SystemTime::now();
-
         #[cfg(feature = "ort")]
         let tensor_array = ndarray::Array4::from_shape_fn((1, 1, 32, 384), |(_, _, y, x)| {
             img.get_pixel(x as u32, y as u32)[0]
@@ -90,9 +77,9 @@ impl YasOCRModel {
         #[cfg(feature = "ort")]
         let tensor_value = Value::from_array(tensor_array)?;
         #[cfg(feature = "ort")]
-        let mut model_borrow = self.model.borrow_mut();
+        let mut model = self.model.lock().unwrap();
         #[cfg(feature = "ort")]
-        let result = model_borrow.run(ort::inputs![tensor_value])?;
+        let result = model.run(ort::inputs![tensor_value])?;
         #[cfg(feature = "tract_onnx")]
         let result = self.model.run(tvec!(tensor.into()))?;
 
@@ -149,11 +136,6 @@ impl YasOCRModel {
             last_word.clone_from(word);
         }
 
-        let time = now.elapsed()?;
-        
-        *self.invoke_count.borrow_mut() += 1;
-        *self.inference_time.borrow_mut() += time;
-
         Ok(ans)
     }
 }
@@ -175,7 +157,7 @@ impl ImageToText<RgbImage> for YasOCRModel {
     }
 
     fn get_average_inference_time(&self) -> Option<Duration> {
-        self.get_average_inference_time()
+        None
     }
 }
 
@@ -198,7 +180,7 @@ impl ImageToText<ImageBuffer<Luma<f32>, Vec<f32>>> for YasOCRModel {
     }
 
     fn get_average_inference_time(&self) -> Option<Duration> {
-        self.get_average_inference_time()
+        None
     }
 }
 
@@ -209,7 +191,7 @@ impl ImageToText<GrayImage> for YasOCRModel {
     }
 
     fn get_average_inference_time(&self) -> Option<Duration> {
-        self.get_average_inference_time()
+        None
     }
 }
 

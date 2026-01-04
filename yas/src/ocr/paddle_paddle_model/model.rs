@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::sync::Mutex;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 use anyhow::Result;
@@ -29,10 +30,7 @@ pub struct PPOCRModel {
     #[cfg(feature = "tract_onnx")]
     model: ModelType,
     #[cfg(feature = "ort")]
-    model: RefCell<Session>,
-
-    inference_count: RefCell<usize>,
-    inference_time: RefCell<Duration>,
+    model: Mutex<Session>,
 }
 
 fn parse_index_to_word(s: &str, use_whitespace: bool) -> Vec<String> {
@@ -54,7 +52,7 @@ impl PPOCRModel {
         #[cfg(feature = "ort")]
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(num_cpus::get())?
+            .with_intra_threads(1)?
             .commit_from_file(onnx_file)?;
 
         #[cfg(feature = "tract_onnx")]
@@ -72,11 +70,9 @@ impl PPOCRModel {
         Ok(Self {
             index_to_word,
             #[cfg(feature = "ort")]
-            model: RefCell::new(session),
+            model: Mutex::new(session),
             #[cfg(feature = "tract_onnx")]
             model,
-            inference_count: RefCell::new(0),
-            inference_time: RefCell::new(Duration::new(0, 0)),
         })
     }
 
@@ -84,7 +80,7 @@ impl PPOCRModel {
         #[cfg(feature = "ort")]
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(num_cpus::get())?
+            .with_intra_threads(1)?
             .commit_from_memory(onnx)?;
 
         #[cfg(feature = "tract_onnx")]
@@ -102,29 +98,19 @@ impl PPOCRModel {
         Ok(Self {
             index_to_word,
             #[cfg(feature = "ort")]
-            model: RefCell::new(session),
+            model: Mutex::new(session),
             #[cfg(feature = "tract_onnx")]
             model,
-            inference_count: RefCell::new(0),
-            inference_time: RefCell::new(Duration::new(0, 0)),
         })
     }
 
     pub fn get_average_inference_time(&self) -> Option<Duration> {
-        if *self.inference_count.borrow() == 0 {
-            None
-        } else {
-            let count = *self.inference_count.borrow();
-            let duration = *self.inference_time.borrow();
-            Some(duration.div_f64(count as f64))
-        }
+        None
     }
 }
 
 impl ImageToText<RgbImage> for PPOCRModel {
     fn image_to_text(&self, image: &RgbImage, _is_preprocessed: bool) -> Result<String> {
-        let start_time = SystemTime::now();
-
         // log::info!("========== [OCR调试] 开始新的识别 ==========");
         // log::info!("[OCR调试] 原始图像尺寸: {}x{}", image.width(), image.height());
         // If image is already preprocessed (fixed size for model), skip resize.
@@ -157,9 +143,9 @@ impl ImageToText<RgbImage> for PPOCRModel {
         #[cfg(feature = "ort")]
         let tensor_value = Value::from_array(tensor)?;
         #[cfg(feature = "ort")]
-        let mut model_borrow = self.model.borrow_mut();
+        let mut model = self.model.lock().unwrap();
         #[cfg(feature = "ort")]
-        let result = model_borrow.run(ort::inputs![tensor_value])?;
+        let result = model.run(ort::inputs![tensor_value])?;
         #[cfg(feature = "tract_onnx")]
         let result = self.model.run(tvec!(tensor.into()))?;
 
@@ -210,7 +196,6 @@ impl ImageToText<RgbImage> for PPOCRModel {
                 let value = arr[[0, i, j]];
                 // println!("{}", value);
                 if value > max_value {
-                    max_value = value;
                     max_index = j;
                 }
             }
@@ -254,15 +239,11 @@ impl ImageToText<RgbImage> for PPOCRModel {
 
         // let s = format!("{:?}", shape);
 
-        let elapsed_time = start_time.elapsed()?;
-        *self.inference_time.borrow_mut() += elapsed_time;
-        *self.inference_count.borrow_mut() += 1;
-
         Ok(s)
     }
 
     fn get_average_inference_time(&self) -> Option<Duration> {
-        self.get_average_inference_time()
+        None
     }
 }
 

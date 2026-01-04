@@ -5,15 +5,17 @@ fn clean_stat_text(s: &str) -> String {
         None => s.trim().to_string(),
     }
 }
-use std::collections::HashSet;
-use std::sync::mpsc::Receiver;
+use std::collections::{HashSet, BTreeMap};
+use std::sync::mpsc::{Receiver, channel};
 use std::thread::JoinHandle;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 use image::Rgb;
 use image::{GenericImageView, RgbImage};
 use log::{error, info, warn};
+use indicatif::{ProgressBar, ProgressStyle};
 
 use yas::ocr::ImageToText;
 use yas::ocr::yas_ocr_model;
@@ -32,7 +34,6 @@ fn parse_level(s: &str) -> Result<i32> {
     let cleaned: String = replaced.chars().filter(|c| c.is_ascii_digit() || *c == '-' || *c == '+').collect();
     let cleaned = cleaned.trim_start_matches('+');
     if cleaned.is_empty() {
-        log::warn!("parse_level 解析失败: 原始内容='{}', o/O->0后为空，自动返回0", s);
         return Ok(0);
     }
     match cleaned.parse::<i32>() {
@@ -44,13 +45,13 @@ fn parse_level(s: &str) -> Result<i32> {
     }
 }
 
-fn get_image_to_text(backend: &str) -> Result<Box<dyn ImageToText<RgbImage> + Send>> {
+fn get_image_to_text(backend: &str) -> Result<Box<dyn ImageToText<RgbImage> + Send + Sync>> {
     match backend.to_lowercase().as_str() {
         "paddle" | "ppocrv5" => {
             // PaddleOCR v5模型，内嵌模型和字典
             let model_bytes = include_bytes!("./models/PP-OCRv5_mobile_rec.onnx");
             let dict_str = include_str!("./models/ppocrv5_dict.txt");
-            let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.to_string()).collect();
+            let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.trim().to_string()).collect();
             // PaddleOCR 字典需要在末尾添加空格字符
             dict_vec.push(String::from(" "));
             let model = PPOCRModel::new(model_bytes, dict_vec)?;
@@ -60,14 +61,14 @@ fn get_image_to_text(backend: &str) -> Result<Box<dyn ImageToText<RgbImage> + Se
             // PaddleOCR v3模型，内嵌模型和字典
             let model_bytes = include_bytes!("./models/ch_PP-OCRv3_rec_infer.onnx");
             let dict_str = include_str!("./models/ppocr_keys_v1.txt");
-            let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.to_string()).collect();
+            let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.trim().to_string()).collect();
             // PaddleOCR 字典需要在末尾添加空格字符
             dict_vec.push(String::from(" "));
             let model = PPOCRModel::new(model_bytes, dict_vec)?;
             Ok(Box::new(model))
         },
         _ => {
-            let model: Box<dyn ImageToText<RgbImage> + Send> = Box::new(
+            let model: Box<dyn ImageToText<RgbImage> + Send + Sync> = Box::new(
                 yas_ocr_model!("./models/model_training.onnx", "./models/index_2_word.json")?
             );
             Ok(model)
@@ -94,21 +95,21 @@ fn save_debug_image(image: &RgbImage, artifact_index: usize, region_tag: &str) -
 
 /// run in a separate thread, accept captured image and get an artifact
 pub struct ArtifactScannerWorker {
-    model: Box<dyn ImageToText<RgbImage> + Send>,
-    paddle_model: Option<Box<dyn ImageToText<RgbImage> + Send>>,
-    paddlev3_model: Option<Box<dyn ImageToText<RgbImage> + Send>>,  // PaddleOCR v3 模型
-    yas_model: Option<Box<dyn ImageToText<RgbImage> + Send>>,
+    model: Box<dyn ImageToText<RgbImage> + Send + Sync>,
+    paddle_model: Option<Box<dyn ImageToText<RgbImage> + Send + Sync>>,
+    paddlev3_model: Option<Box<dyn ImageToText<RgbImage> + Send + Sync>>,  // PaddleOCR v3 模型
+    yas_model: Option<Box<dyn ImageToText<RgbImage> + Send + Sync>>,
     window_info: ArtifactScannerWindowInfo,
     config: GenshinArtifactScannerConfig,
 }
 
 impl ArtifactScannerWorker {
-    fn get_model_for_backend(backend: &str) -> Result<Box<dyn ImageToText<RgbImage> + Send>> {
+    fn get_model_for_backend(backend: &str) -> Result<Box<dyn ImageToText<RgbImage> + Send + Sync>> {
         match backend.to_lowercase().as_str() {
             "paddle" | "ppocrv5" => {
                 let model_bytes = include_bytes!("./models/PP-OCRv5_mobile_rec.onnx");
                 let dict_str = include_str!("./models/ppocrv5_dict.txt");
-                let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.to_string()).collect();
+                let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.trim().to_string()).collect();
                 // PaddleOCR 字典需要在末尾添加空格字符
                 dict_vec.push(String::from(" "));
                 let model = PPOCRModel::new(model_bytes, dict_vec)?;
@@ -117,14 +118,14 @@ impl ArtifactScannerWorker {
             "paddlev3" | "ppocrv3" => {
                 let model_bytes = include_bytes!("./models/ch_PP-OCRv3_rec_infer.onnx");
                 let dict_str = include_str!("./models/ppocr_keys_v1.txt");
-                let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.to_string()).collect();
+                let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.trim().to_string()).collect();
                 // PaddleOCR 字典需要在末尾添加空格字符
                 dict_vec.push(String::from(" "));
                 let model = PPOCRModel::new(model_bytes, dict_vec)?;
                 Ok(Box::new(model))
             },
             _ => {
-                let model: Box<dyn ImageToText<RgbImage> + Send> = Box::new(
+                let model: Box<dyn ImageToText<RgbImage> + Send + Sync> = Box::new(
                     yas_ocr_model!("./models/model_training.onnx", "./models/index_2_word.json")?
                 );
                 Ok(model)
@@ -259,32 +260,10 @@ impl ArtifactScannerWorker {
     /// Parse the captured result (of type SendItem) to a scanned artifact
     fn scan_item_image(&self, item: SendItem, lock: bool, artifact_index: usize) -> Result<GenshinArtifactScanResult> {
         let image = &item.panel_image;
-        let str_main_stat_name = self.model_inference(self.window_info.main_stat_name_rect, image, artifact_index, "main_stat_name")?;
-        let str_main_stat_value = self.model_inference(self.window_info.main_stat_value_rect, image, artifact_index, "main_stat_value")?;
-        
-        // 检测是否有祝圣文本，如果有则计算需要向下偏移的距离
-        let shift_offset = self.detect_consecration_shift(image, artifact_index);
-        
-        // 应用偏移后的副词条区域
-        let sub_stat_1_rect = self.window_info.sub_stat_1.translate(Pos { x: 0.0, y: shift_offset });
-        let sub_stat_2_rect = self.window_info.sub_stat_2.translate(Pos { x: 0.0, y: shift_offset });
-        let sub_stat_3_rect = self.window_info.sub_stat_3.translate(Pos { x: 0.0, y: shift_offset });
-        let sub_stat_4_rect = self.window_info.sub_stat_4.translate(Pos { x: 0.0, y: shift_offset });
-        let level_rect = self.window_info.level_rect.translate(Pos { x: 0.0, y: shift_offset });
-        
-        let str_sub_stat0 = clean_stat_text(&self.model_inference(sub_stat_1_rect, image, artifact_index, "substat1")?);
-        let str_sub_stat1 = clean_stat_text(&self.model_inference(sub_stat_2_rect, image, artifact_index, "substat2")?);
-
-        // Save debug image if enabled
-        if self.config.save_images {
-            // if let Err(e) = save_debug_image(image, artifact_index, "panel") {
-            //     warn!("Failed to save debug image: {}", e);
-            // }
-        }
 
         let str_title = {
             // 使用 PaddleOCR v5 模型识别 title (圣遗物名称)
-            let model: &Box<dyn ImageToText<RgbImage> + Send> = self.paddle_model.as_ref().expect("paddle_model should be initialized for title recognition");
+            let model: &Box<dyn ImageToText<RgbImage> + Send + Sync> = self.paddle_model.as_ref().expect("paddle_model should be initialized for title recognition");
             let relative_rect = self.window_info.title_rect.translate(Pos {
                 x: -self.window_info.panel_rect.left,
                 y: -self.window_info.panel_rect.top,
@@ -301,9 +280,46 @@ impl ArtifactScannerWorker {
             
             model.image_to_text(&raw_img, false)?
         };
+
+        // 如果是祝圣精华等非圣遗物，提前返回，避免后续解析错误
+        if str_title.contains("祝圣精华") || str_title.contains("祝圣油膏") {
+            return anyhow::Ok(GenshinArtifactScanResult {
+                name: str_title,
+                main_stat_name: String::new(),
+                main_stat_value: String::new(),
+                sub_stat: [String::new(), String::new(), String::new(), String::new()],
+                level: 0,
+                equip: String::new(),
+                star: item.star as i32,
+                lock,
+                index: artifact_index,
+            });
+        }
+
+        let str_main_stat_name = self.model_inference(self.window_info.main_stat_name_rect, image, artifact_index, "main_stat_name")?;
+        let str_main_stat_value = self.model_inference(self.window_info.main_stat_value_rect, image, artifact_index, "main_stat_value")?;
+        
+        // 检测是否有祝圣文本，如果有则计算需要向下偏移的距离
+        // 只有 5 星圣遗物才可能有祝圣属性偏移
+        let shift_offset = if item.star == 5 {
+            self.detect_consecration_shift(image, artifact_index)
+        } else {
+            0.0
+        };
+        
+        // 应用偏移后的副词条区域
+        let sub_stat_1_rect = self.window_info.sub_stat_1.translate(Pos { x: 0.0, y: shift_offset });
+        let sub_stat_2_rect = self.window_info.sub_stat_2.translate(Pos { x: 0.0, y: shift_offset });
+        let sub_stat_3_rect = self.window_info.sub_stat_3.translate(Pos { x: 0.0, y: shift_offset });
+        let sub_stat_4_rect = self.window_info.sub_stat_4.translate(Pos { x: 0.0, y: shift_offset });
+        let level_rect = self.window_info.level_rect.translate(Pos { x: 0.0, y: shift_offset });
+        
+        let str_sub_stat0 = clean_stat_text(&self.model_inference(sub_stat_1_rect, image, artifact_index, "substat1")?);
+        let str_sub_stat1 = clean_stat_text(&self.model_inference(sub_stat_2_rect, image, artifact_index, "substat2")?);
+
         let str_sub_stat3 = if !self.config.substat4_ocr_backend.is_empty() {
             let backend = self.config.substat4_ocr_backend.to_lowercase();
-            let model: &Box<dyn ImageToText<RgbImage> + Send> = match backend.as_str() {
+            let model: &Box<dyn ImageToText<RgbImage> + Send + Sync> = match backend.as_str() {
                 "paddle" | "ppocrv5" => self.paddle_model.as_ref().expect("paddle_model should be initialized"),
                 "paddlev3" | "ppocrv3" => self.paddlev3_model.as_ref().expect("paddlev3_model should be initialized"),
                 "yas" => self.yas_model.as_ref().expect("yas_model should be initialized"),
@@ -350,7 +366,7 @@ impl ArtifactScannerWorker {
                 }
             }
 
-            let model: &Box<dyn ImageToText<RgbImage> + Send> = self.paddle_model.as_ref().expect("paddle_model should be initialized for equip recognition");
+            let model: &Box<dyn ImageToText<RgbImage> + Send + Sync> = self.paddle_model.as_ref().expect("paddle_model should be initialized for equip recognition");
             // Resize equip region to fixed size (320x48) to match Python preprocessing, then mark as preprocessed
             let fixed = image::imageops::resize(&raw_img, 320, 48, image::imageops::FilterType::Triangle);
             model.image_to_text(&fixed, true)?
@@ -414,57 +430,94 @@ impl ArtifactScannerWorker {
         result
     }
 
-    pub fn run(self, rx: Receiver<Option<SendItem>>) -> JoinHandle<Vec<GenshinArtifactScanResult>> {
+    pub fn run(self, rx: Receiver<Option<SendItem>>, total_count: usize) -> JoinHandle<Vec<GenshinArtifactScanResult>> {
+        let worker = Arc::new(self);
         std::thread::spawn(move || {
             let mut results = Vec::new();
             let mut hash: HashSet<GenshinArtifactScanResult> = HashSet::new();
             // if too many artifacts are same in consecutive, then an error has occurred
             let mut consecutive_dup_count = 0;
 
-            let is_verbose = self.config.verbose;
-            let min_level = self.config.min_level;
-            let info = self.window_info.clone();
-            // todo remove dump mode to another scanner
-            // let dump_mode = false;
-            // let model = self.model.clone();
-            // let panel_origin = Pos { x: self.window_info.panel_rect.left, y: self.window_info.panel_rect.top };
+            let is_verbose = worker.config.verbose;
+            let min_level = worker.config.min_level;
+            let info = worker.window_info.clone();
 
-            let mut locks = Vec::new();
-            let mut artifact_index: i32 = 0;
+            let pb = ProgressBar::new(total_count as u64);
+            pb.set_style(ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"));
 
-            for item in rx.into_iter() {
-                // receiving None, which means the worker should end
-                let item = match item {
-                    Some(v) => v,
-                    None => break,
-                };
+            let (tx_ocr, rx_ocr) = channel();
+            let worker_clone = worker.clone();
 
-                // if there is a list image, then parse the lock state
-                match item.list_image.as_ref() {
-                    Some(v) => {
-                        locks = vec![locks, self.get_page_locks(v)].concat()
+            // 启动一个线程来接收图像并分发 OCR 任务
+            std::thread::spawn(move || {
+                let mut locks = Vec::new();
+                let mut items_count = 0;
+                for item in rx {
+                    let item = match item {
+                        Some(v) => v,
+                        None => break,
+                    };
+                    
+                    // 如果有列表图像，更新锁定状态缓存
+                    if let Some(v) = item.list_image.as_ref() {
+                        locks.extend(worker_clone.get_page_locks(v));
                     }
-                    None => {}
-                };
 
-                artifact_index += 1;
-                let lock_flag = if (artifact_index as usize - 1) < locks.len() {
-                    locks[artifact_index as usize - 1]
-                } else {
-                    error!(
-                        "locks 越界：artifact_index={}，locks.len()={}，本次物品将视为未锁定。请检查背包截图或窗口参数。",
-                        artifact_index, locks.len()
-                    );
-                    false
-                };
-                let result = match self.scan_item_image(item, lock_flag, artifact_index as usize) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!("识别错误: {}", e);
-                        continue;
+                    let index = items_count;
+                    items_count += 1;
+                    let lock = if index < locks.len() { locks[index] } else { false };
+                    
+                    let worker_inner = worker_clone.clone();
+                    let tx_ocr_inner = tx_ocr.clone();
+                    
+                    rayon::spawn(move || {
+                        let res = worker_inner.scan_item_image(item, lock, index + 1);
+                        let _ = tx_ocr_inner.send((index, res));
+                    });
+                }
+            });
+
+            let mut results_map = BTreeMap::new();
+            let mut next_index = 0;
+
+            // 按顺序处理 OCR 结果
+            loop {
+                // 如果结果映射中没有下一个索引的结果，则从通道中接收
+                while !results_map.contains_key(&next_index) {
+                    match rx_ocr.recv() {
+                        Ok((i, res)) => {
+                            results_map.insert(i, res);
+                        },
+                        Err(_) => break,
                     }
+                }
+
+                let result = match results_map.remove(&next_index) {
+                    Some(res) => {
+                        next_index += 1;
+                        match res {
+                            Ok(v) => v,
+                            Err(e) => {
+                                error!("识别错误: {}", e);
+                                pb.inc(1);
+                                continue;
+                            }
+                        }
+                    },
+                    None => break, // 通道已关闭且没有更多结果
                 };
 
+                // 过滤非圣遗物物品（如祝圣精华、祝圣油膏）
+                if result.name.contains("祝圣精华") || result.name.contains("祝圣油膏") {
+                    if is_verbose {
+                        info!("跳过非圣遗物物品: {}", result.name);
+                    }
+                    pb.inc(1);
+                    continue;
+                }
 
                 if is_verbose {
                     info!("{:?}", result);
@@ -473,7 +526,7 @@ impl ArtifactScannerWorker {
                 if let Err(e) = crate::artifact::GenshinArtifact::try_from(&result) {
                     error!(
                         "artifact_index={} GenshinArtifact::try_from 失败，name='{}', main_stat_name='{}', main_stat_value='{}', sub_stat4='{}'，原因: {:?}",
-                        artifact_index,
+                        next_index,
                         result.name,
                         result.main_stat_name,
                         result.main_stat_value,
@@ -485,8 +538,9 @@ impl ArtifactScannerWorker {
                 if result.level < min_level {
                     info!(
                         "扫描终止：找到满足最低等级要求 {} 的物品({})，已扫描 {} 个。",
-                        min_level, result.level, artifact_index
+                        min_level, result.level, next_index
                     );
+                    pb.finish_with_message("终止");
                     break;
                 }
 
@@ -499,24 +553,24 @@ impl ArtifactScannerWorker {
                     results.push(result);
                 }
 
-                if consecutive_dup_count >= info.col && !self.config.ignore_dup {
+                pb.inc(1);
+
+                if consecutive_dup_count >= info.col && !worker.config.ignore_dup {
                     error!(
                         "扫描终止：识别到连续 {} 个重复物品，可能为翻页错误，或者为非背包顶部开始扫描，已扫描 {} 个。",
-                        consecutive_dup_count, artifact_index
+                        consecutive_dup_count, next_index
                     );
+                    pb.finish_with_message("重复终止");
                     break;
                 }
 
-                // if token.cancelled() {
-                // error!("扫描任务被取消");
-                // break;
-                // }
+                if next_index >= total_count {
+                    break;
+                }
             }
 
+            pb.finish_with_message("完成");
             info!("识别结束，非重复物品数量: {}", hash.len());
-
-            // progress_bar.finish();
-            // MULTI_PROGRESS.remove(&progress_bar);
 
             results
         })

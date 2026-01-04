@@ -1201,19 +1201,6 @@ dependencies = [
 
 [[package]]
 name = "indicatif"
-version = "0.17.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "183b3088984b400f4cfac3620d5e076c84da5364016b4f49473de574b2586235"
-dependencies = [
- "console 0.15.11",
- "number_prefix",
- "portable-atomic",
- "unicode-width 0.2.1",
- "web-time",
-]
-
-[[package]]
-name = "indicatif"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70a646d946d06bedbbc4cac4c218acf4bbf2d87757a784857025f4d447e4e1cd"
@@ -1231,7 +1218,7 @@ version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63703cf9069b85dbe6fe26e1c5230d013dee99d3559cd3d02ba39e099ef7ab02"
 dependencies = [
- "indicatif 0.18.0",
+ "indicatif",
  "log",
 ]
 
@@ -1746,12 +1733,6 @@ dependencies = [
  "hermit-abi 0.5.2",
  "libc",
 ]
-
-[[package]]
-name = "number_prefix"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
 name = "objc"
@@ -3921,6 +3902,8 @@ dependencies = [
  "anyhow",
  "clap",
  "env_logger",
+ "indicatif",
+ "indicatif-log-bridge",
  "log",
  "winres",
  "yas-wutheringwaves",
@@ -3978,7 +3961,7 @@ dependencies = [
  "edit-distance",
  "enigo",
  "image",
- "indicatif 0.17.11",
+ "indicatif",
  "indicatif-log-bridge",
  "lazy_static",
  "libwayshot 0.3.0",
@@ -4024,8 +4007,10 @@ dependencies = [
  "edit-distance",
  "env_logger",
  "image",
+ "indicatif",
  "lazy_static",
  "log",
+ "rayon",
  "regex",
  "serde",
  "serde_json",

@@ -3,9 +3,12 @@ use yas_genshin::application::ArtifactScannerApplication;
 use log::error;
 
 pub fn main() {
-    env_logger::Builder::new()
+    let logger = env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
-        .init();
+        .build();
+    indicatif_log_bridge::LogWrapper::new(indicatif::MultiProgress::new(), logger)
+        .try_init()
+        .unwrap();
 
     let command = ArtifactScannerApplication::build_command();
     let matches = match command.try_get_matches() {

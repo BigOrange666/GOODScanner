@@ -35,11 +35,15 @@ pub struct GenshinArtifactScannerConfig {
     #[arg(long, help = "选择OCR后端: yas 或 paddle", default_value = "yas")]
     pub ocr_backend: String,
 
+    /// 圣遗物数量识别OCR后端: yas 或 paddle，留空则与 ocr_backend 一致
+    #[arg(long, help = "圣遗物数量识别OCR后端: yas 或 paddle，留空则与 ocr_backend 一致", default_value = "ppocrv5")]
+    pub item_count_ocr_backend: String,
+
     /// 副词条4单独指定OCR后端: yas 或 paddle，留空则与 ocr_backend 一致
     #[arg(long, help = "副词条4单独指定OCR后端: yas 或 paddle，留空则与 ocr_backend 一致", default_value = "paddlev3")]
     pub substat4_ocr_backend: String,
 
     /// 每次切换圣遗物后的额外等待时间(ms)
-    #[arg(id = "delay", long, help = "每次切换圣遗物后的额外等待时间(ms)", default_value_t = 50)]
+    #[arg(id = "delay", long, help = "每次切换圣遗物后的额外等待时间(ms)", default_value_t = 20)]
     pub delay: u32,
 }

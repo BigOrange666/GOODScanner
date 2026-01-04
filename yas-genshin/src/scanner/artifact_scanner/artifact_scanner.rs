@@ -7,7 +7,7 @@ use log::{error, info};
 
 use yas::capture::{Capturer, GenericCapturer};
 use yas::game_info::GameInfo;
-use yas::ocr::{ImageToText, yas_ocr_model};
+use yas::ocr::{ImageToText, yas_ocr_model, PPOCRModel};
 use yas::positioning::Pos;
 use yas::window_info::FromWindowInfoRepository;
 use yas::window_info::WindowInfoRepository;
@@ -35,7 +35,7 @@ pub struct GenshinArtifactScanner {
     scanner_config: GenshinArtifactScannerConfig,
     window_info: ArtifactScannerWindowInfo,
     game_info: GameInfo,
-    image_to_text: Box<dyn ImageToText<RgbImage> + Send>,
+    item_count_image_to_text: Box<dyn ImageToText<RgbImage> + Send>,
     controller: Rc<RefCell<GenshinRepositoryScanController>>,
     capturer: Rc<dyn Capturer<RgbImage>>,
 }
@@ -46,11 +46,31 @@ impl GenshinArtifactScanner {
 
 // constructor
 impl GenshinArtifactScanner {
-    fn get_image_to_text() -> Result<Box<dyn ImageToText<RgbImage> + Send>> {
-        let model: Box<dyn ImageToText<RgbImage> + Send> = Box::new(
-            yas_ocr_model!("./models/model_training.onnx", "./models/index_2_word.json")?
-        );
-        Ok(model)
+    fn get_image_to_text(backend: &str) -> Result<Box<dyn ImageToText<RgbImage> + Send>> {
+        match backend.to_lowercase().as_str() {
+            "paddle" | "ppocrv5" => {
+                let model_bytes = include_bytes!("./models/PP-OCRv5_mobile_rec.onnx");
+                let dict_str = include_str!("./models/ppocrv5_dict.txt");
+                let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.trim().to_string()).collect();
+                dict_vec.push(String::from(" "));
+                let model = PPOCRModel::new(model_bytes, dict_vec)?;
+                Ok(Box::new(model))
+            },
+            "paddlev3" | "ppocrv3" => {
+                let model_bytes = include_bytes!("./models/ch_PP-OCRv3_rec_infer.onnx");
+                let dict_str = include_str!("./models/ppocr_keys_v1.txt");
+                let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.trim().to_string()).collect();
+                dict_vec.push(String::from(" "));
+                let model = PPOCRModel::new(model_bytes, dict_vec)?;
+                Ok(Box::new(model))
+            },
+            _ => {
+                let model: Box<dyn ImageToText<RgbImage> + Send> = Box::new(
+                    yas_ocr_model!("./models/model_training.onnx", "./models/index_2_word.json")?
+                );
+                Ok(model)
+            }
+        }
     }
 
     fn get_capturer() -> Result<Rc<dyn Capturer<RgbImage>>> {
@@ -63,6 +83,12 @@ impl GenshinArtifactScanner {
         controller_config: GenshinRepositoryScannerLogicConfig,
         game_info: GameInfo,
     ) -> Result<Self> {
+        let item_count_image_to_text = if config.item_count_ocr_backend.is_empty() {
+            Self::get_image_to_text(&config.ocr_backend)?
+        } else {
+            Self::get_image_to_text(&config.item_count_ocr_backend)?
+        };
+
         Ok(Self {
             scanner_config: config,
             window_info: ArtifactScannerWindowInfo::from_window_info_repository(
@@ -75,7 +101,7 @@ impl GenshinArtifactScanner {
                 GenshinRepositoryScanController::new(window_info_repo, controller_config, game_info.clone(), true)?
             )),
             game_info,
-            image_to_text: Self::get_image_to_text()?,
+            item_count_image_to_text,
             // item count will be set later, once the scan starts
             capturer: Self::get_capturer()?,
         })
@@ -92,14 +118,21 @@ impl GenshinArtifactScanner {
             game_info.platform,
             window_info_repo,
         )?;
+        let config = GenshinArtifactScannerConfig::from_arg_matches(arg_matches)?;
+        let item_count_image_to_text = if config.item_count_ocr_backend.is_empty() {
+            Self::get_image_to_text(&config.ocr_backend)?
+        } else {
+            Self::get_image_to_text(&config.item_count_ocr_backend)?
+        };
+
         Ok(GenshinArtifactScanner {
-            scanner_config: GenshinArtifactScannerConfig::from_arg_matches(arg_matches)?,
+            scanner_config: config,
             window_info,
             controller: Rc::new(RefCell::new(
                 GenshinRepositoryScanController::from_arg_matches(window_info_repo, arg_matches, game_info.clone(), true)?
             )),
             game_info,
-            image_to_text: Self::get_image_to_text()?,
+            item_count_image_to_text,
             capturer: Self::get_capturer()?,
         })
     }
@@ -143,7 +176,6 @@ impl GenshinArtifactScanner {
 
     pub fn get_item_count(&self) -> Result<i32> {
         let count = self.scanner_config.number;
-        let item_name = "圣遗物";
 
         let max_count = Self::MAX_COUNT as i32;
         if count > 0 {
@@ -154,19 +186,29 @@ impl GenshinArtifactScanner {
             self.window_info.item_count_rect.to_rect_i32(),
             self.game_info.window.origin(),
         )?;
-        // im.save("item_count.png")?;
-        let s = self.image_to_text.image_to_text(&im, false)?;
+        
+        if self.scanner_config.save_images {
+            let debug_dir = std::path::Path::new("./debug_images");
+            if !debug_dir.exists() {
+                std::fs::create_dir_all(debug_dir)?;
+            }
+            let image_path = debug_dir.join("item_count.png");
+            im.save(&image_path)?;
+            info!("Debug image saved: {}", image_path.display());
+        }
+
+        let s = self.item_count_image_to_text.image_to_text(&im, false)?;
 
         info!("物品信息: {}", s);
 
-        if s.starts_with(item_name) {
-            let chars = s.chars().collect::<Vec<char>>();
-            let count_str = chars[4..chars.len() - 5].iter().collect::<String>();
-            Ok(match count_str.parse::<usize>() {
-                Ok(v) => (v as i32).min(max_count),
-                Err(_) => max_count,
-            })
+        let filtered: String = s.chars().filter(|c| c.is_ascii_digit() || *c == '/').collect();
+        let count_part = filtered.split('/').next().unwrap_or("");
+        
+        if let Ok(v) = count_part.parse::<usize>() {
+            info!("识别到数量: {}", v);
+            Ok((v as i32).min(max_count))
         } else {
+            info!("无法解析数量，使用默认最大值: {}", max_count);
             Ok(max_count)
         }
     }
@@ -183,7 +225,7 @@ impl GenshinArtifactScanner {
             self.scanner_config.clone(),
         )?;
 
-        let join_handle = worker.run(rx);
+        let join_handle = worker.run(rx, count as usize);
         info!("Worker created");
 
         self.send(&tx, count);
