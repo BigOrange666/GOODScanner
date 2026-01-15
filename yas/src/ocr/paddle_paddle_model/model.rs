@@ -7,7 +7,7 @@ use image::{EncodableLayout, RgbImage};
 #[cfg(feature = "tract_onnx")]
 use tract_onnx::tract_hir::shapefactoid;
 use crate::ocr::ImageToText;
-use crate::ocr::paddle_paddle_model::preprocess::{resize_img, resize_pad};
+use crate::ocr::paddle_paddle_model::preprocess::resize_img;
 use crate::positioning::Shape3D;
 use crate::utils::read_file_to_string;
 #[cfg(feature = "ort")]
@@ -118,14 +118,7 @@ impl ImageToText<RgbImage> for PPOCRModel {
             // Assume caller provided an image already sized to model input (H=48, W=320)
             image.clone()
         } else {
-            let wh_ratio = image.width() as f64 / image.height() as f64;
-            if wh_ratio < (320.0 / 48.0) {
-                // 对于窄图或低分辨率图，使用填充方式缩放至 320x48，避免拉伸变形
-                resize_pad(image, 320, 48)
-            } else {
-                // 对于宽图，保持原有逻辑（高度缩放至48，宽度按比例缩放）
-                resize_img(Shape3D::new(3, 48, 320), image)
-            }
+            resize_img(Shape3D::new(3, 48, 320), image)
         };
         // log::info!("[OCR调试] 缩放后图像尺寸: {}x{}", resized_image.width(), resized_image.height());
 

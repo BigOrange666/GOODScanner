@@ -20,29 +20,6 @@ pub fn resize_img(rec_image_shape: Shape3D<u32>, img: &RgbImage) -> RgbImage {
     resized_image
 }
 
-/// Resize to a fixed (width, height) with padding to maintain aspect ratio.
-/// This is better for low-resolution images.
-pub fn resize_pad(img: &RgbImage, target_width: u32, target_height: u32) -> RgbImage {
-    let width = img.width();
-    let height = img.height();
-
-    let ratio = (target_width as f64 / width as f64).min(target_height as f64 / height as f64);
-    let new_width = (width as f64 * ratio) as u32;
-    let new_height = (height as f64 * ratio) as u32;
-
-    let resized = resize(img, new_width, new_height, FilterType::Triangle);
-
-    let mut canvas = RgbImage::from_pixel(target_width, target_height, image::Rgb([255, 255, 255]));
-    
-    // Copy resized image to canvas (top-left aligned)
-    for y in 0..new_height {
-        for x in 0..new_width {
-            canvas.put_pixel(x, y, *resized.get_pixel(x, y));
-        }
-    }
-
-    canvas
-}
 
 /// Resize to a fixed (width, height). This matches Python's cv2.resize((width, height)).
 pub fn resize_to_fixed(target_width: u32, target_height: u32, img: &RgbImage) -> RgbImage {
