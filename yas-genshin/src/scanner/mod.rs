@@ -15,3 +15,9 @@ pub mod weapon_scanner;
 pub mod character_scanner;
 // mod item_scanner;
 
+// GOODScanner port — separate scanner modules
+pub mod good_common;
+pub mod good_character_scanner;
+pub mod good_weapon_scanner;
+pub mod good_artifact_scanner;
+
