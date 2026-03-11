@@ -16,7 +16,11 @@ pub const WEAPON_STOP_NAMES: &[&str] = &[
     "\u{65E0}\u{950B}\u{5251}",                     // 无锋剑
 ];
 
-/// Characters that have no constellations (skip constellation scanning)
+/// Characters that have no constellations or special constellation handling (skip scanning).
+/// Traveler has element-specific constellations that require special UI handling.
+/// Characters with no constellation scanning.
+/// Aloy/Manekin/Manekina have no constellations.
+/// Traveler has element-specific constellation sub-tabs that require special UI handling.
 pub const NO_CONSTELLATION_CHARACTERS: &[&str] = &["Aloy", "Manekin", "Manekina"];
 
 // ================================================================
@@ -53,11 +57,12 @@ pub const CHAR_CONSTELLATION_Y_STEP: f64 = 113.0;
 pub const CHAR_CONSTELLATION_ACTIVATE_RECT: (f64, f64, f64, f64) = (218.0, 1002.0, 82.0, 31.0);
 
 /// Talent overview OCR regions (level display on right side of talent list)
-pub const CHAR_TALENT_OVERVIEW_AUTO: (f64, f64, f64, f64) = (1630.0, 166.0, 70.0, 30.0);
-pub const CHAR_TALENT_OVERVIEW_SKILL: (f64, f64, f64, f64) = (1630.0, 256.0, 70.0, 30.0);
-pub const CHAR_TALENT_OVERVIEW_BURST: (f64, f64, f64, f64) = (1630.0, 346.0, 70.0, 30.0);
+/// Width: 90px to accommodate 2-digit levels (Lv.13) at 1080p.
+pub const CHAR_TALENT_OVERVIEW_AUTO: (f64, f64, f64, f64) = (1620.0, 166.0, 90.0, 30.0);
+pub const CHAR_TALENT_OVERVIEW_SKILL: (f64, f64, f64, f64) = (1620.0, 256.0, 90.0, 30.0);
+pub const CHAR_TALENT_OVERVIEW_BURST: (f64, f64, f64, f64) = (1620.0, 346.0, 90.0, 30.0);
 /// Special burst position for Ayaka/Mona (4-slot talent layout)
-pub const CHAR_TALENT_OVERVIEW_BURST_SPECIAL: (f64, f64, f64, f64) = (1630.0, 436.0, 70.0, 30.0);
+pub const CHAR_TALENT_OVERVIEW_BURST_SPECIAL: (f64, f64, f64, f64) = (1620.0, 436.0, 90.0, 30.0);
 
 /// Talent detail click positions (x=1695, y = 165 + index*90)
 pub const CHAR_TALENT_CLICK_X: f64 = 1695.0;

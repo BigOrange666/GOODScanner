@@ -98,3 +98,88 @@ Key flags:
 - Chinese (zh_CN) game client only — OCR models trained on Chinese game text
 - GOOD v3 format spec: keys use PascalCase (e.g., `"SkywardHarp"`, `"Furina"`)
 - The `data/` directory (gitignored) caches remote mapping files
+
+## Artifact Scanner Details
+
+### Dual-Engine OCR Pipeline
+
+The artifact scanner uses two OCR backends simultaneously:
+- **Main engine** (ppocrv5): Part name, main stat, set name, equip text
+- **Substat engine** (ppocrv4): Substats and level (better for small numbers)
+
+Both engines OCR each substat line. Results are collected as `OcrCandidate` lists per line, then validated by the roll solver.
+
+### Roll Solver (`roll_solver.rs`)
+
+Validates substat combinations against game mechanics:
+- Uses pre-computed **rollTable** lookup (from `rollTable.json` via `roll_table.rs`) — NOT brute-force f64 enumeration
+- Each entry is `(display_value×10: i32, roll_count_bitmask: u8)`, binary searched
+- Validates total roll count = init_count + level/4
+- **Init preference**: Level 0 → prefer higher init first (lines = init count); Level > 0 → prefer lower init (better accuracy)
+- Outputs `totalRolls`, `initialValue` per substat, and `inactive` flag
+- The solver treats inactive (待激活) substats identically to active ones — their values are real roll values
+
+### Elixir Crafted Detection
+
+Elixir artifacts display a purple banner ("祝圣之霜定义") that shifts all content down by 40px (`ELIXIR_SHIFT`).
+- Detection: 3 pixels at (1510, 1520, 1530), y=423 — checks for purple (blue > 230 && blue > green + 40)
+- **Do NOT move to x=1683** — that hits the lock icon and causes massive false positives
+- When detected, all subsequent OCR regions are Y-shifted by 40px
+
+### Substat Crop Regions
+
+- Lines 0–2: width 255px (calibrated to avoid OCR noise from wider crops)
+- Line 3: width 355px (wider to capture "(待激活)" text on unactivated substats)
+- All start at x=1356
+
+### Unactivated Substats (待激活)
+
+- Appear on level-0 artifacts as the 4th substat line with muted font and "(待激活)" appended
+- The stat key and value are real (not zero) — it's the value that WILL be added on first level-up
+- `stat_parser.rs` detects "(待激活)" text and sets `ParsedStat.inactive = true`, keeping the real value
+- `OcrCandidate.inactive` propagates through the solver to `SolvedSubstat.inactive`
+- Scanner splits solver results into `substats` (active) and `unactivated_substats` (inactive) in the output
+
+### Pixel-Based Detection (highly reliable)
+
+- **Rarity**: Star pixel color at fixed Y positions
+- **Lock**: Pixel color at `ARTIFACT_LOCK_POS1` (1683, 428)
+- **Elixir**: Purple banner check at (1510–1530, 423)
+- **Astral mark**: Pixel at `ARTIFACT_ASTRAL_POS1`
+
+### Parallelization
+
+- `OcrPool`: Channel-based pool of N OCR model instances
+- `scan_worker`: Generic parallel worker for backpack grid items
+- **ALWAYS create separate pools** for main and substat OCR (sharing causes deadlock: N tasks each hold 1 instance, all waiting for a 2nd)
+
+## Testing & Validation
+
+### Groundtruth
+
+- `genshin_export.json`: Exported via third-party tool, contains complete artifact/character/weapon data
+- Note: GT uses typo `elixerCrafted` (not `elixirCrafted`) — diff report handles both
+
+### Diff Report (`diff_report.py`)
+
+- Compares scan output against groundtruth with Hungarian algorithm matching
+- Groups by `(setKey, slotKey, rarity, lock)` — rarity and lock are hard matching requirements (pixel-based, very reliable)
+- Three-tier categorization: non-stat diffs, stat-key diffs, stat-value-only diffs
+- Always run scans with `--good-dump-images` so dump images match the scan output
+- Use `python diff_report.py <scan.json> <gt.json>` to generate `diff_report.md`
+
+### Other Scripts
+
+- `test_solver.py`: Validates roll solver against groundtruth (expects ~99.7% totalRolls accuracy)
+- `gen_roll_table.py`: Generates `roll_table.rs` from `rollTable.json`
+
+### Key Calibration Values
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Substat width (lines 0–2) | 255px | Wider causes OCR failures |
+| Substat width (line 3) | 355px | Captures "(待激活)" text |
+| delay_after_panel | 100ms | Lock/astral mark animation |
+| Talent overview width | 90px | Supports 2-digit levels |
+| ELIXIR_SHIFT | 40px | Purple banner height |
+| Elixir pixel positions | (1510–1530, 423) | Do NOT use x=1683 |

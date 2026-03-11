@@ -39,4 +39,8 @@ pub struct GoodWeaponScannerConfig {
     /// Log each weapon as it's scanned
     #[arg(long = "good-weapon-log-progress", default_value_t = false)]
     pub log_progress: bool,
+
+    /// Dump OCR region images for debugging
+    #[arg(long = "good-weapon-dump-images", default_value_t = false)]
+    pub dump_images: bool,
 }

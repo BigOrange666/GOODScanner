@@ -16,6 +16,11 @@ pub struct GoodArtifactScannerConfig {
     #[arg(long = "good-artifact-ocr-backend", default_value = "ppocrv5")]
     pub ocr_backend: String,
 
+    /// Secondary OCR backend for dual-engine substat/level recognition.
+    /// Used alongside the main backend; results are merged.
+    #[arg(long = "good-artifact-substat-ocr-backend", default_value = "ppocrv4")]
+    pub substat_ocr_backend: String,
+
     /// Delay per grid item (ms)
     #[arg(long = "good-artifact-grid-delay", default_value_t = DEFAULT_DELAY_GRID_ITEM)]
     pub delay_grid_item: u64,
@@ -39,4 +44,8 @@ pub struct GoodArtifactScannerConfig {
     /// Log each artifact as it's scanned
     #[arg(long = "good-artifact-log-progress", default_value_t = false)]
     pub log_progress: bool,
+
+    /// Dump OCR region images for debugging
+    #[arg(long = "good-artifact-dump-images", default_value_t = false)]
+    pub dump_images: bool,
 }

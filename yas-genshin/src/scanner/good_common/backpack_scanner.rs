@@ -29,6 +29,9 @@ pub enum GridEvent {
 pub struct BackpackScanConfig {
     pub delay_grid_item: u64,
     pub delay_scroll: u64,
+    /// Extra delay (ms) after panel load, before capture.
+    /// Allows lock/astral mark animations to finish.
+    pub delay_after_panel: u64,
 }
 
 /// Panel pool rect — region of the detail panel whose pixel sum changes
@@ -244,6 +247,11 @@ impl<'a> BackpackScanner<'a> {
                         PANEL_POOL_RECT,
                         PANEL_LOAD_TIMEOUT_MS,
                     );
+
+                    // Extra delay for lock/astral mark animations to finish
+                    if _config.delay_after_panel > 0 {
+                        utils::sleep(_config.delay_after_panel as u32);
+                    }
 
                     // Capture and process
                     let image = match self.ctrl.capture_game() {

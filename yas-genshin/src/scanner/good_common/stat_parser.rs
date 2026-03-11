@@ -44,7 +44,8 @@ lazy_static! {
         names
     };
 
-    static ref NUM_REGEX: Regex = Regex::new(r"[+\s]?([\d]+\.?\d*)").unwrap();
+    /// Matches numbers like "5.8", "15", ".7" (missing integer part → 0.7), "5."
+    static ref NUM_REGEX: Regex = Regex::new(r"[+\s]?([\d]+\.?\d*|\.\d+)").unwrap();
 
     /// Match digit-space-dot-digit or digit-dot-space-digit patterns.
     /// Used to collapse "4 .7" or "4. 7" into "4.7".
@@ -182,7 +183,7 @@ fn parse_stat_suffix(text: &str) -> Option<ParsedStat> {
 
         return Some(ParsedStat {
             key,
-            value: if is_inactive { 0.0 } else { value },
+            value,
             inactive: is_inactive,
         });
     }
@@ -244,7 +245,7 @@ fn parse_stat_inner(text: &str) -> Option<ParsedStat> {
 
         return Some(ParsedStat {
             key,
-            value: if is_inactive { 0.0 } else { value },
+            value,
             inactive: is_inactive,
         });
     }
@@ -413,7 +414,7 @@ mod tests {
         let s = r.unwrap();
         assert_eq!(s.key, "hp_");
         assert!(s.inactive);
-        assert!((s.value - 0.0).abs() < 0.01); // inactive → value 0
+        assert!((s.value - 4.1).abs() < 0.01); // inactive keeps real value
     }
 
     #[test]

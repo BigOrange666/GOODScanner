@@ -27,4 +27,8 @@ pub struct GoodCharacterScannerConfig {
     /// Log each character as it's scanned
     #[arg(long = "good-char-log-progress", default_value_t = false)]
     pub log_progress: bool,
+
+    /// Dump OCR region images for debugging
+    #[arg(long = "good-char-dump-images", default_value_t = false)]
+    pub dump_images: bool,
 }

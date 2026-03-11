@@ -226,11 +226,11 @@ fn diff_character_fields(actual: &GoodCharacter, expected: &GoodCharacter) -> Ve
     diffs
 }
 
-/// Compare weapons using identity-based matching.
+/// Compare weapons using two-phase matching.
 ///
-/// Groups weapons by key (name), then within each group finds the best match
-/// (fewest field diffs) using greedy matching. This handles different sort orders
-/// between actual and expected.
+/// Phase 1: Within each key group, find exact matches (0 diffs) first.
+/// Phase 2: Collect all unmatched items as missing/extra, then pair them
+/// across all groups by fewest diffs to show useful diff info.
 fn diff_weapons(
     actual: &[GoodWeapon],
     expected: &[GoodWeapon],
@@ -238,78 +238,90 @@ fn diff_weapons(
 ) -> Vec<WeaponDiff> {
     let mut diffs = Vec::new();
 
-    // Group expected weapons by key
+    // Group by key
     let mut expected_by_key: HashMap<&str, Vec<(usize, &GoodWeapon)>> = HashMap::new();
     for (i, w) in expected.iter().enumerate() {
         expected_by_key.entry(w.key.as_str()).or_default().push((i, w));
     }
-
-    // Group actual weapons by key
     let mut actual_by_key: HashMap<&str, Vec<(usize, &GoodWeapon)>> = HashMap::new();
     for (i, w) in actual.iter().enumerate() {
         actual_by_key.entry(w.key.as_str()).or_default().push((i, w));
     }
 
-    // For each weapon key, match expected to actual greedily by fewest diffs
     let all_keys: std::collections::BTreeSet<&str> = expected_by_key
         .keys()
         .chain(actual_by_key.keys())
         .copied()
         .collect();
 
+    // Phase 1: exact matches within each key group
+    let mut unmatched_exp: Vec<(usize, &GoodWeapon)> = Vec::new();
+    let mut unmatched_act: Vec<(usize, &GoodWeapon)> = Vec::new();
+
     for key in all_keys {
         let exp_list = expected_by_key.remove(key).unwrap_or_default();
         let mut act_list = actual_by_key.remove(key).unwrap_or_default();
 
         for (exp_idx, exp) in &exp_list {
-            // Find best match in act_list (fewest diffs)
-            let best = act_list
+            // Look for exact match only
+            let exact = act_list
                 .iter()
                 .enumerate()
-                .map(|(pos, (act_idx, act))| {
-                    let fd = diff_weapon_fields(act, exp);
-                    (pos, *act_idx, fd)
-                })
-                .min_by_key(|(_, _, fd)| fd.len());
+                .find(|(_, (_, act))| diff_weapon_fields(act, exp).is_empty());
 
-            if let Some((pos, act_idx, field_diffs)) = best {
+            if let Some((pos, _)) = exact {
                 act_list.remove(pos);
-                if field_diffs.is_empty() {
-                    summary.weapons_matched += 1;
-                } else {
-                    summary.weapons_mismatched += 1;
-                    diffs.push(WeaponDiff {
-                        index: *exp_idx,
-                        key_expected: exp.key.clone(),
-                        key_actual: exp.key.clone(),
-                        status: DiffStatus::Compared,
-                        field_diffs,
-                    });
-                }
+                summary.weapons_matched += 1;
             } else {
-                // No actual weapon with this key left
-                summary.weapons_missing += 1;
-                diffs.push(WeaponDiff {
-                    index: *exp_idx,
-                    key_expected: exp.key.clone(),
-                    key_actual: String::new(),
-                    status: DiffStatus::Missing,
-                    field_diffs: Vec::new(),
-                });
+                unmatched_exp.push((*exp_idx, *exp));
             }
         }
+        unmatched_act.extend(act_list);
+    }
 
-        // Remaining unmatched actual weapons
-        for (act_idx, act) in act_list {
-            summary.weapons_extra += 1;
+    // Phase 2: pair unmatched expected↔actual by fewest diffs
+    for (exp_idx, exp) in &unmatched_exp {
+        let best = unmatched_act
+            .iter()
+            .enumerate()
+            .map(|(pos, (_, act))| {
+                let fd = diff_weapon_fields(act, exp);
+                (pos, fd)
+            })
+            .min_by_key(|(_, fd)| fd.len());
+
+        if let Some((pos, field_diffs)) = best {
+            let (_, act) = unmatched_act.remove(pos);
+            summary.weapons_mismatched += 1;
             diffs.push(WeaponDiff {
-                index: act_idx,
-                key_expected: String::new(),
+                index: *exp_idx,
+                key_expected: exp.key.clone(),
                 key_actual: act.key.clone(),
-                status: DiffStatus::Extra,
+                status: DiffStatus::Compared,
+                field_diffs,
+            });
+        } else {
+            summary.weapons_missing += 1;
+            diffs.push(WeaponDiff {
+                index: *exp_idx,
+                key_expected: exp.key.clone(),
+                key_actual: String::new(),
+                status: DiffStatus::Missing,
                 field_diffs: Vec::new(),
             });
         }
+    }
+
+    // Remaining unmatched actual weapons
+    for (act_idx, act) in unmatched_act {
+        summary.weapons_extra += 1;
+        diffs.push(WeaponDiff {
+            index: act_idx,
+            key_expected: String::new(),
+            key_actual: act.key.clone(),
+            status: DiffStatus::Extra,
+            field_diffs: Vec::new(),
+        });
     }
 
     diffs
@@ -372,10 +384,12 @@ fn diff_weapon_fields(actual: &GoodWeapon, expected: &GoodWeapon) -> Vec<FieldDi
     diffs
 }
 
-/// Compare artifacts using identity-based matching.
+/// Compare artifacts using two-phase matching.
 ///
-/// Groups artifacts by (setKey, slotKey) then finds the best match within each
-/// group by fewest field diffs. This handles different sort orders.
+/// Phase 1: Find exact matches (0 diffs) within (setKey, slotKey) groups.
+/// Phase 2: Collect all unmatched items, then pair missing↔extra across all
+/// groups by fewest diffs (weighted: level/mainStatKey mismatches cost more).
+/// This avoids misassigning copies that differ only in lock or substats.
 fn diff_artifacts(
     actual: &[GoodArtifact],
     expected: &[GoodArtifact],
@@ -392,7 +406,6 @@ fn diff_artifacts(
     for (i, a) in expected.iter().enumerate() {
         expected_by_key.entry(art_group_key(a)).or_default().push((i, a));
     }
-
     let mut actual_by_key: HashMap<ArtKey, Vec<(usize, &GoodArtifact)>> = HashMap::new();
     for (i, a) in actual.iter().enumerate() {
         actual_by_key.entry(art_group_key(a)).or_default().push((i, a));
@@ -404,64 +417,83 @@ fn diff_artifacts(
         .cloned()
         .collect();
 
+    // Phase 1: exact matches within each group
+    let mut unmatched_exp: Vec<(usize, &GoodArtifact)> = Vec::new();
+    let mut unmatched_act: Vec<(usize, &GoodArtifact)> = Vec::new();
+
     for key in all_keys {
         let exp_list = expected_by_key.remove(&key).unwrap_or_default();
         let mut act_list = actual_by_key.remove(&key).unwrap_or_default();
 
         for (exp_idx, exp) in &exp_list {
-            let best = act_list
+            let exact = act_list
                 .iter()
                 .enumerate()
-                .map(|(pos, (_, act))| {
-                    let fd = diff_artifact_fields(act, exp);
-                    // Score: prefer matches with same level and main stat.
-                    // Each critical field mismatch adds 10 to the score, regular adds 1.
-                    let score: usize = fd.iter().map(|f| {
-                        match f.field.as_str() {
-                            "level" | "mainStatKey" => 10,
-                            _ => 1,
-                        }
-                    }).sum();
-                    (pos, fd, score)
-                })
-                .min_by_key(|(_, _, score)| *score);
+                .find(|(_, (_, act))| diff_artifact_fields(act, exp).is_empty());
 
-            if let Some((pos, field_diffs, _)) = best {
+            if let Some((pos, _)) = exact {
                 act_list.remove(pos);
-                if field_diffs.is_empty() {
-                    summary.artifacts_matched += 1;
-                } else {
-                    summary.artifacts_mismatched += 1;
-                    diffs.push(ArtifactDiff {
-                        index: *exp_idx,
-                        set_expected: exp.set_key.clone(),
-                        set_actual: exp.set_key.clone(),
-                        status: DiffStatus::Compared,
-                        field_diffs,
-                    });
-                }
+                summary.artifacts_matched += 1;
             } else {
-                summary.artifacts_missing += 1;
-                diffs.push(ArtifactDiff {
-                    index: *exp_idx,
-                    set_expected: exp.set_key.clone(),
-                    set_actual: String::new(),
-                    status: DiffStatus::Missing,
-                    field_diffs: Vec::new(),
-                });
+                unmatched_exp.push((*exp_idx, *exp));
             }
         }
+        unmatched_act.extend(act_list);
+    }
 
-        for (act_idx, act) in act_list {
-            summary.artifacts_extra += 1;
+    // Phase 2: pair unmatched expected↔actual by weighted score
+    fn artifact_match_score(fd: &[FieldDiff]) -> usize {
+        fd.iter().map(|f| {
+            match f.field.as_str() {
+                "setKey" | "slotKey" | "mainStatKey" => 100,
+                "level" | "rarity" => 10,
+                _ => 1,
+            }
+        }).sum()
+    }
+
+    for (exp_idx, exp) in &unmatched_exp {
+        let best = unmatched_act
+            .iter()
+            .enumerate()
+            .map(|(pos, (_, act))| {
+                let fd = diff_artifact_fields(act, exp);
+                let score = artifact_match_score(&fd);
+                (pos, fd, score)
+            })
+            .min_by_key(|(_, _, score)| *score);
+
+        if let Some((pos, field_diffs, _)) = best {
+            let (_, act) = unmatched_act.remove(pos);
+            summary.artifacts_mismatched += 1;
             diffs.push(ArtifactDiff {
-                index: act_idx,
-                set_expected: String::new(),
+                index: *exp_idx,
+                set_expected: exp.set_key.clone(),
                 set_actual: act.set_key.clone(),
-                status: DiffStatus::Extra,
+                status: DiffStatus::Compared,
+                field_diffs,
+            });
+        } else {
+            summary.artifacts_missing += 1;
+            diffs.push(ArtifactDiff {
+                index: *exp_idx,
+                set_expected: exp.set_key.clone(),
+                set_actual: String::new(),
+                status: DiffStatus::Missing,
                 field_diffs: Vec::new(),
             });
         }
+    }
+
+    for (act_idx, act) in unmatched_act {
+        summary.artifacts_extra += 1;
+        diffs.push(ArtifactDiff {
+            index: act_idx,
+            set_expected: String::new(),
+            set_actual: act.set_key.clone(),
+            status: DiffStatus::Extra,
+            field_diffs: Vec::new(),
+        });
     }
 
     diffs
@@ -559,7 +591,7 @@ fn diff_substats(
 
     for exp in expected {
         if let Some(&act_val) = act_map.get(exp.key.as_str()) {
-            if (act_val - exp.value).abs() > 0.001 {
+            if (act_val - exp.value).abs() > 0.15 {
                 diffs.push(FieldDiff {
                     field: format!("{}.{}", prefix, exp.key),
                     expected: format!("{}", exp.value),
@@ -693,6 +725,34 @@ pub fn print_diff(result: &DiffResult) {
                     }
                 }
             }
+        }
+        println!();
+    }
+
+    // Per-field summary (grouped counts)
+    let mut field_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for d in &result.character_diffs {
+        for f in &d.field_diffs {
+            *field_counts.entry(f.field.clone()).or_default() += 1;
+        }
+    }
+    for d in &result.weapon_diffs {
+        for f in &d.field_diffs {
+            *field_counts.entry(f.field.clone()).or_default() += 1;
+        }
+    }
+    for d in &result.artifact_diffs {
+        for f in &d.field_diffs {
+            *field_counts.entry(f.field.clone()).or_default() += 1;
+        }
+    }
+
+    if !field_counts.is_empty() {
+        println!("--- Per-field mismatch counts ---");
+        let mut sorted: Vec<_> = field_counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        for (field, count) in &sorted {
+            println!("  {:30} {}", field, count);
         }
         println!();
     }

@@ -1,0 +1,607 @@
+#!/usr/bin/env python3
+"""Generate a markdown diff report with embedded OCR region images.
+
+Usage:
+    python diff_report.py [actual.json] [expected.json] [--images debug_images]
+
+If no args given, auto-discovers the latest good_export_*.json as actual
+and genshin_export.json as expected.
+"""
+
+import json
+import sys
+import os
+import glob
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+
+# Field → dump image file(s) mapping
+ARTIFACT_FIELD_IMAGES = {
+    "setKey": ["set_name.png"],
+    "mainStatKey": ["main_stat.png"],
+    "slotKey": ["name.png"],
+    "level": ["level.png"],
+    "rarity": ["star5_px.png", "star4_px.png"],
+    "location": ["equip.png"],
+    "lock": ["lock_px.png"],
+    "astralMark": ["astral_px.png"],
+    "elixirCrafted": ["elixir_px.png"],
+}
+
+WEAPON_FIELD_IMAGES = {
+    "key": ["name.png"],
+    "level": ["level.png"],
+    "refinement": ["refinement.png"],
+    "location": ["equip.png"],
+    "lock": ["lock_px.png"],
+    "rarity": ["star5_px.png", "star4_px.png", "star3_px.png"],
+}
+
+# For substats, any substat field maps to all sub images
+SUBSTAT_IMAGES = ["sub0.png", "sub1.png", "sub2.png", "sub3.png"]
+
+
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def find_latest_export():
+    """Find the most recent good_export_*.json file."""
+    files = glob.glob("good_export_*.json")
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)
+
+
+def compare_substats(expected_subs, actual_subs):
+    """Compare two substat lists, return list of (field, expected, actual) diffs."""
+    diffs = []
+    exp_map = {s["key"]: s["value"] for s in (expected_subs or [])}
+    act_map = {s["key"]: s["value"] for s in (actual_subs or [])}
+    all_keys = sorted(set(list(exp_map.keys()) + list(act_map.keys())))
+
+    if len(expected_subs or []) != len(actual_subs or []):
+        diffs.append(("substats.count", str(len(expected_subs or [])), str(len(actual_subs or []))))
+
+    for k in all_keys:
+        ev = exp_map.get(k)
+        av = act_map.get(k)
+        if ev is None:
+            diffs.append((f"substats.{k}", "missing", str(av)))
+        elif av is None:
+            diffs.append((f"substats.{k}", str(ev), "missing"))
+        elif abs(ev - av) > 0.15:
+            diffs.append((f"substats.{k}", str(ev), str(av)))
+    return diffs
+
+
+def _diff_score(diffs):
+    """Weighted score for a diff list — higher means worse match.
+
+    Weights prioritize structural similarity:
+    - setKey/slotKey/mainStatKey: 1000 (completely different artifact)
+    - substats.count / unactivatedSubstats.count: 200 (structural shape)
+    - level/rarity: 100 (major metadata mismatch)
+    - missing/extra substat keys: 20 (structural mismatch)
+    - substat value errors: 1 (OCR accuracy error)
+    """
+    score = 0
+    for f, ev, av in diffs:
+        if f in ("setKey", "slotKey", "mainStatKey"):
+            score += 1000
+        elif f.endswith(".count"):
+            score += 200
+        elif f in ("level", "rarity"):
+            score += 100
+        elif ev in ("missing", "(missing)") or av in ("missing", "(missing)") \
+                or str(ev) == "present" or str(av) == "present":
+            score += 20  # key presence/absence is structural
+        else:
+            score += 1  # value accuracy error
+    return score
+
+
+def _match_within_group(exp_list, act_list):
+    """Optimal matching within a group using the Hungarian algorithm.
+
+    Finds the globally minimum-weight bipartite matching, which prevents
+    the pair-stealing problem of greedy approaches.
+
+    Returns (matched_pairs, unmatched_exp, unmatched_act).
+    matched_pairs: list of (exp_idx, act_idx, exp_obj, act_obj, diffs)
+    """
+    if not exp_list or not act_list:
+        return [], list(exp_list), list(act_list)
+
+    n_exp = len(exp_list)
+    n_act = len(act_list)
+
+    # Build cost matrix and diff cache
+    cost = np.full((n_exp, n_act), 1e9)
+    diff_cache = {}
+    for ei_pos, (ei, exp) in enumerate(exp_list):
+        for ai_pos, (ai, act) in enumerate(act_list):
+            diffs = diff_single_artifact(exp, act)
+            score = _diff_score(diffs)
+            cost[ei_pos, ai_pos] = score
+            diff_cache[(ei_pos, ai_pos)] = (ei, ai, exp, act, diffs)
+
+    # Hungarian algorithm — globally optimal assignment
+    row_ind, col_ind = linear_sum_assignment(cost)
+
+    matched = []
+    used_exp = set()
+    used_act = set()
+    for r, c in zip(row_ind, col_ind):
+        if cost[r, c] < 1e9:
+            ei, ai, exp, act, diffs = diff_cache[(r, c)]
+            matched.append((ei, ai, exp, act, diffs))
+            used_exp.add(r)
+            used_act.add(c)
+
+    unmatched_exp = [(ei, exp) for pos, (ei, exp) in enumerate(exp_list) if pos not in used_exp]
+    unmatched_act = [(ai, act) for pos, (ai, act) in enumerate(act_list) if pos not in used_act]
+    return matched, unmatched_exp, unmatched_act
+
+
+def diff_artifacts(expected, actual):
+    """Match and diff artifacts using two-phase approach.
+
+    Phase 1: Within each (setKey, slotKey) group, find optimal pairings
+             using greedy best-pair matching (not just exact matches).
+    Phase 2: Pair remaining cross-group items by fewest weighted diffs.
+    """
+    results = []
+
+    # Group by (setKey, slotKey, rarity, lock) — rarity and lock are pixel-based
+    # and highly reliable, so they serve as hard matching requirements.
+    exp_by_key = defaultdict(list)
+    for i, a in enumerate(expected):
+        key = (a.get("setKey", ""), a.get("slotKey", ""), a.get("rarity", 0), a.get("lock", False))
+        exp_by_key[key].append((i, a))
+    act_by_key = defaultdict(list)
+    for i, a in enumerate(actual):
+        key = (a.get("setKey", ""), a.get("slotKey", ""), a.get("rarity", 0), a.get("lock", False))
+        act_by_key[key].append((i, a))
+
+    all_keys = sorted(set(list(exp_by_key.keys()) + list(act_by_key.keys())))
+    cross_unmatched_exp = []
+    cross_unmatched_act = []
+
+    # Phase 1: optimal matching within each group
+    for key in all_keys:
+        exp_list = list(exp_by_key.get(key, []))
+        act_list = list(act_by_key.get(key, []))
+        matched, um_exp, um_act = _match_within_group(exp_list, act_list)
+
+        for ei, ai, exp, act, diffs in matched:
+            if diffs:
+                results.append((ai, exp.get("setKey", "?"), exp.get("slotKey", "?"), diffs, exp, act))
+
+        cross_unmatched_exp.extend(um_exp)
+        cross_unmatched_act.extend(um_act)
+
+    # Phase 2: pair remaining cross-group items by fewest diffs
+    remaining_act = list(range(len(cross_unmatched_act)))
+    for ei, exp in cross_unmatched_exp:
+        best_pos = None
+        best_diffs = None
+        best_score = float("inf")
+        for pos_idx, pos in enumerate(remaining_act):
+            ai, act = cross_unmatched_act[pos]
+            diffs = diff_single_artifact(exp, act)
+            score = _diff_score(diffs)
+            if score < best_score:
+                best_score = score
+                best_diffs = diffs
+                best_pos = pos_idx
+        if best_pos is not None:
+            ai, act = cross_unmatched_act[remaining_act[best_pos]]
+            remaining_act.pop(best_pos)
+            if best_diffs:
+                results.append((ai, exp.get("setKey", "?"), exp.get("slotKey", "?"), best_diffs, exp, act))
+        else:
+            results.append((ei, exp.get("setKey", "?"), exp.get("slotKey", "?"),
+                          [("_status", "MISSING from actual", "")], exp, {}))
+
+    for pos in remaining_act:
+        ai, act = cross_unmatched_act[pos]
+        results.append((ai, act.get("setKey", "?"), act.get("slotKey", "?"),
+                      [("_status", "", "EXTRA in actual")], {}, act))
+
+    return results
+
+
+def diff_single_artifact(exp, act):
+    """Compare two artifact objects, return list of (field, expected, actual)."""
+    diffs = []
+    for field in ["setKey", "slotKey", "mainStatKey", "level", "rarity", "location", "lock",
+                   "astralMark"]:
+        ev = exp.get(field)
+        av = act.get(field)
+        if ev is None:
+            continue
+        if ev != av:
+            diffs.append((field, str(ev), str(av)))
+
+    # Handle elixirCrafted field — GT uses typo "elixerCrafted", scan uses "elixirCrafted"
+    exp_elixir = exp.get("elixirCrafted", exp.get("elixerCrafted"))
+    act_elixir = act.get("elixirCrafted", act.get("elixerCrafted"))
+    if exp_elixir is not None and exp_elixir != act_elixir:
+        diffs.append(("elixirCrafted", str(exp_elixir), str(act_elixir)))
+
+    diffs.extend(compare_substats(exp.get("substats"), act.get("substats")))
+    diffs.extend(compare_substats_named(
+        "unactivatedSubstats", exp.get("unactivatedSubstats"), act.get("unactivatedSubstats")))
+    return diffs
+
+
+def compare_substats_named(prefix, expected_subs, actual_subs):
+    """Like compare_substats but with a custom prefix."""
+    diffs = []
+    exp_map = {s["key"]: s["value"] for s in (expected_subs or [])}
+    act_map = {s["key"]: s["value"] for s in (actual_subs or [])}
+    all_keys = sorted(set(list(exp_map.keys()) + list(act_map.keys())))
+
+    if len(expected_subs or []) != len(actual_subs or []):
+        diffs.append((f"{prefix}.count", str(len(expected_subs or [])), str(len(actual_subs or []))))
+
+    for k in all_keys:
+        ev = exp_map.get(k)
+        av = act_map.get(k)
+        if ev is None:
+            diffs.append((f"{prefix}.{k}", "missing", str(av)))
+        elif av is None:
+            diffs.append((f"{prefix}.{k}", str(ev), "missing"))
+        elif abs(ev - av) > 0.15:
+            diffs.append((f"{prefix}.{k}", str(ev), str(av)))
+    return diffs
+
+
+def diff_weapons(expected, actual):
+    """Match and diff weapons using two-phase approach.
+
+    Phase 1: Find exact matches (0 diffs) within each key group.
+    Phase 2: Pair remaining unmatched items by fewest diffs across all groups.
+    """
+    results = []
+    exp_by_key = defaultdict(list)
+    for i, w in enumerate(expected):
+        exp_by_key[w.get("key", "")].append((i, w))
+    act_by_key = defaultdict(list)
+    for i, w in enumerate(actual):
+        act_by_key[w.get("key", "")].append((i, w))
+
+    all_keys = sorted(set(list(exp_by_key.keys()) + list(act_by_key.keys())))
+    unmatched_exp = []
+    unmatched_act = []
+
+    # Phase 1: exact matches
+    for key in all_keys:
+        exp_list = list(exp_by_key.get(key, []))
+        act_list = list(act_by_key.get(key, []))
+        act_available = list(range(len(act_list)))
+
+        for ei, exp in exp_list:
+            found = False
+            for pos_idx, pos in enumerate(act_available):
+                ai, act = act_list[pos]
+                if not diff_single_weapon(exp, act):
+                    act_available.pop(pos_idx)
+                    found = True
+                    break
+            if not found:
+                unmatched_exp.append((ei, exp))
+        for pos in act_available:
+            unmatched_act.append(act_list[pos])
+
+    # Phase 2: pair unmatched by fewest diffs
+    remaining_act = list(range(len(unmatched_act)))
+    for ei, exp in unmatched_exp:
+        best_pos = None
+        best_diffs = None
+        best_len = float("inf")
+        for pos_idx, pos in enumerate(remaining_act):
+            ai, act = unmatched_act[pos]
+            diffs = diff_single_weapon(exp, act)
+            if len(diffs) < best_len:
+                best_len = len(diffs)
+                best_diffs = diffs
+                best_pos = pos_idx
+        if best_pos is not None:
+            ai, act = unmatched_act[remaining_act[best_pos]]
+            remaining_act.pop(best_pos)
+            if best_diffs:
+                results.append((ai, exp.get("key", "?"), best_diffs))
+        else:
+            results.append((ei, exp.get("key", "?"), [("_status", "MISSING from actual", "")]))
+
+    for pos in remaining_act:
+        ai, act = unmatched_act[pos]
+        results.append((ai, act.get("key", "?"), [("_status", "", "EXTRA in actual")]))
+
+    return results
+
+
+def diff_single_weapon(exp, act):
+    diffs = []
+    for field in ["key", "level", "ascension", "refinement", "rarity", "location", "lock"]:
+        ev = exp.get(field)
+        av = act.get(field)
+        # Skip fields missing from expected (groundtruth doesn't track them)
+        if ev is None:
+            continue
+        if ev != av:
+            diffs.append((field, str(ev), str(av)))
+    return diffs
+
+
+def find_dump_folder(images_dir, category, index, name_hint=""):
+    """Find the dump folder for an item by index."""
+    exact = os.path.join(images_dir, category, f"{index:04d}")
+    if os.path.isdir(exact):
+        return exact
+    # Fallback: try with name suffix (old format)
+    pattern = os.path.join(images_dir, category, f"{index:04d}_*")
+    matches = glob.glob(pattern)
+    if matches:
+        return matches[0]
+    return None
+
+
+def image_ref(folder, filename):
+    """Return markdown image reference if file exists."""
+    if folder is None:
+        return ""
+    path = os.path.join(folder, filename)
+    if os.path.exists(path):
+        # Use relative path for markdown
+        rel = os.path.relpath(path).replace("\\", "/")
+        return f"![{filename}]({rel})"
+    return ""
+
+
+def images_for_field(folder, field, category="artifact"):
+    """Get relevant image references for a diff field."""
+    if folder is None:
+        return []
+
+    field_map = ARTIFACT_FIELD_IMAGES if category == "artifact" else WEAPON_FIELD_IMAGES
+    refs = []
+
+    if field in field_map:
+        for img in field_map[field]:
+            ref = image_ref(folder, img)
+            if ref:
+                refs.append(ref)
+    elif "substats" in field or "unactivated" in field:
+        for img in SUBSTAT_IMAGES:
+            ref = image_ref(folder, img)
+            if ref:
+                refs.append(ref)
+
+    return refs
+
+
+def diff_characters(expected, actual):
+    """Match and diff characters by key."""
+    results = []
+    exp_map = {c["key"]: c for c in expected}
+    act_map = {c["key"]: c for c in actual}
+    all_keys = sorted(set(list(exp_map.keys()) + list(act_map.keys())))
+
+    for key in all_keys:
+        exp = exp_map.get(key)
+        act = act_map.get(key)
+        if exp is None:
+            results.append((key, [("_status", "", "EXTRA in actual")]))
+            continue
+        if act is None:
+            results.append((key, [("_status", "MISSING from actual", "")]))
+            continue
+        diffs = []
+        for field in ["level", "constellation", "ascension", "element"]:
+            ev = exp.get(field)
+            av = act.get(field)
+            if ev is not None and ev != av:
+                diffs.append((field, str(ev), str(av)))
+        # Compare talents
+        exp_t = exp.get("talent", {})
+        act_t = act.get("talent", {})
+        for tf in ["auto", "skill", "burst"]:
+            ev = exp_t.get(tf)
+            av = act_t.get(tf)
+            if ev is not None and ev != av:
+                diffs.append((f"talent.{tf}", str(ev), str(av)))
+        if diffs:
+            results.append((key, diffs))
+    return results
+
+
+def generate_report(actual_path, expected_path, images_dir="debug_images"):
+    actual = load_json(actual_path)
+    expected = load_json(expected_path)
+
+    lines = []
+    lines.append("# Scan Diff Report\n")
+    lines.append(f"- **Actual**: `{actual_path}`")
+    lines.append(f"- **Expected**: `{expected_path}`")
+    lines.append(f"- **Images**: `{images_dir}/`\n")
+
+    # === ARTIFACTS ===
+    exp_artifacts = expected.get("artifacts") or []
+    act_artifacts = actual.get("artifacts") or []
+    artifact_diffs = diff_artifacts(exp_artifacts, act_artifacts)
+
+    lines.append(f"## Artifacts ({len(act_artifacts)} scanned, {len(exp_artifacts)} expected, {len(artifact_diffs)} issues)\n")
+
+    # Per-field summary — separate non-stat fields (top 10) from stat fields (top 3)
+    a_field_counts = defaultdict(int)
+    for _, _, _, diffs, *_ in artifact_diffs:
+        for field, _, _ in diffs:
+            if field != "_status":
+                a_field_counts[field] += 1
+
+    stat_fields = {f for f in a_field_counts
+                   if ("substats." in f or "unactivated" in f) and not f.endswith(".count")}
+    non_stat_fields = {f for f in a_field_counts if f not in stat_fields}
+
+    if non_stat_fields:
+        lines.append("### Non-stat field summary (top 10)\n")
+        lines.append("| Field | Count |")
+        lines.append("|-------|-------|")
+        for field, count in sorted(
+            [(f, a_field_counts[f]) for f in non_stat_fields], key=lambda x: -x[1]
+        )[:10]:
+            lines.append(f"| {field} | {count} |")
+        lines.append("")
+
+    if stat_fields:
+        lines.append("### Stat field summary (top 3)\n")
+        lines.append("| Field | Count |")
+        lines.append("|-------|-------|")
+        for field, count in sorted(
+            [(f, a_field_counts[f]) for f in stat_fields], key=lambda x: -x[1]
+        )[:3]:
+            lines.append(f"| {field} | {count} |")
+        remaining = len(stat_fields) - 3
+        if remaining > 0:
+            total_stat_errors = sum(a_field_counts[f] for f in stat_fields)
+            top3_errors = sum(c for _, c in sorted(
+                [(f, a_field_counts[f]) for f in stat_fields], key=lambda x: -x[1]
+            )[:3])
+            lines.append(f"| *... {remaining} more stat fields* | *{total_stat_errors - top3_errors} total* |")
+        lines.append("")
+
+    # Categorize diffs into 3 tiers:
+    # 1. Non-stat diffs: setKey/slotKey/mainStatKey/level/rarity/location/lock
+    # 2. Stat-key diffs: substat keys missing/extra (structural mismatch)
+    # 3. Stat-value only: only substat value errors
+    if artifact_diffs:
+        non_stat_fields = {"setKey", "slotKey", "mainStatKey", "level", "rarity", "location", "lock",
+                           "astralMark", "elixirCrafted"}
+        cat_nonstat = []   # has non-stat field diffs (incl. substats.count)
+        cat_statkey = []   # has missing/extra substat keys but no non-stat
+        cat_statval = []   # only substat value diffs
+
+        for entry in sorted(artifact_diffs, key=lambda x: x[0]):
+            idx, set_key, slot_key, diffs, exp_art, act_art = entry
+            real_fields = [(f, ev, av) for f, ev, av in diffs if f != "_status"]
+
+            has_non_stat = any(
+                f in non_stat_fields or f.endswith(".count")
+                for f, _, _ in real_fields
+            )
+            has_key_diff = any(
+                (ev in ("missing", "(missing)") or av in ("missing", "(missing)")
+                 or str(ev) == "present" or str(av) == "present")
+                for f, ev, av in real_fields
+                if f not in non_stat_fields and not f.endswith(".count")
+            )
+
+            if has_non_stat:
+                cat_nonstat.append(entry)
+            elif has_key_diff:
+                cat_statkey.append(entry)
+            else:
+                cat_statval.append(entry)
+
+        def render_diff_entry(entry, lines_out):
+            idx, set_key, slot_key, diffs, exp_art, act_art = entry
+            is_missing = any(f == "_status" and "MISSING" in ev for f, ev, av in diffs)
+            folder = None if is_missing else find_dump_folder(images_dir, "artifacts", idx)
+            status = ""
+            for field, ev, av in diffs:
+                if field == "_status":
+                    status = f" **{ev}{av}**"
+
+            # Show elixirCrafted status (GT uses typo "elixerCrafted")
+            gt_elixir = exp_art.get("elixirCrafted", exp_art.get("elixerCrafted", False))
+            scan_elixir = act_art.get("elixirCrafted", act_art.get("elixerCrafted", False))
+            elixir_tag = f" [elixir: gt={gt_elixir} scan={scan_elixir}]"
+
+            diff_fields = [f for f, _, _ in diffs if f != "_status"]
+            diff_summary = ", ".join(diff_fields[:5])
+            if len(diff_fields) > 5:
+                diff_summary += f" +{len(diff_fields)-5} more"
+
+            lines_out.append(f"#### [{idx:04d}] {set_key} / {slot_key}{status}{elixir_tag} — {diff_summary}\n")
+
+            # List diffs with per-field images inline
+            for field, ev, av in diffs:
+                if field == "_status":
+                    continue
+                lines_out.append(f"- **{field}**: expected=`{ev}` actual=`{av}`")
+                imgs = images_for_field(folder, field, "artifact")
+                for img in imgs:
+                    lines_out.append(f"  - {img}")
+
+            # Full screenshot in collapsible section
+            if folder:
+                full_ref = image_ref(folder, "full.png")
+                if full_ref:
+                    lines_out.append(f"\n<details><summary>Full screenshot</summary>\n\n{full_ref}\n\n</details>")
+            lines_out.append("")
+
+        # Tier 1: Non-stat diffs (ALL)
+        if cat_nonstat:
+            lines.append(f"### Tier 1: Non-stat field diffs ({len(cat_nonstat)} items)\n")
+            for entry in cat_nonstat:
+                render_diff_entry(entry, lines)
+
+        # Tier 2: Stat-key diffs (ALL, capped at 50)
+        if cat_statkey:
+            show = min(len(cat_statkey), 50)
+            lines.append(f"### Tier 2: Stat-key diffs ({len(cat_statkey)} items, showing {show})\n")
+            for i, entry in enumerate(cat_statkey):
+                if i >= 50:
+                    lines.append(f"\n*... and {len(cat_statkey) - 50} more*\n")
+                    break
+                render_diff_entry(entry, lines)
+
+        # Tier 3: Stat-value only diffs (first 30)
+        if cat_statval:
+            show = min(len(cat_statval), 30)
+            lines.append(f"### Tier 3: Stat-value only diffs ({len(cat_statval)} items, showing {show})\n")
+            for i, entry in enumerate(cat_statval):
+                if i >= 30:
+                    lines.append(f"\n*... and {len(cat_statval) - 30} more*\n")
+                    break
+                render_diff_entry(entry, lines)
+
+    return "\n".join(lines)
+
+
+def main():
+    images_dir = "debug_images"
+
+    if len(sys.argv) >= 3:
+        actual_path = sys.argv[1]
+        expected_path = sys.argv[2]
+        if len(sys.argv) >= 5 and sys.argv[3] == "--images":
+            images_dir = sys.argv[4]
+    else:
+        actual_path = find_latest_export()
+        if actual_path is None:
+            print("No good_export_*.json found. Run the scan first.")
+            sys.exit(1)
+        expected_path = "genshin_export.json"
+
+    print(f"Actual:   {actual_path}")
+    print(f"Expected: {expected_path}")
+    print(f"Images:   {images_dir}/")
+
+    report = generate_report(actual_path, expected_path, images_dir)
+
+    output = "diff_report.md"
+    with open(output, "w", encoding="utf-8") as f:
+        f.write(report)
+
+    print(f"Report written to {output}")
+
+
+if __name__ == "__main__":
+    main()

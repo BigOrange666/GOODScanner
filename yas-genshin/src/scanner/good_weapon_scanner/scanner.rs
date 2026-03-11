@@ -23,8 +23,11 @@ use crate::scanner::good_common::pixel_utils;
 use crate::scanner::good_common::scan_worker::{self, WorkItem};
 use crate::scanner::good_common::stat_parser::level_to_ascension;
 
-/// Computed OCR regions for weapon card (at 1920x1080 base).
-/// Port of the WEAPON_OCR calculation from GOODScanner/lib/weapon_scanner.js
+/// OCR regions for weapon card (at 1920x1080 base).
+///
+/// Computed from card proportions (card origin 1307,119, size 494x841).
+/// The proportional approach adapts better to the actual card layout than
+/// the hardcoded constants from the JS port.
 struct WeaponOcrRegions {
     name: (f64, f64, f64, f64),
     level: (f64, f64, f64, f64),
@@ -40,7 +43,7 @@ impl WeaponOcrRegions {
         let card_h: f64 = 841.0;
 
         Self {
-            name: (card_x, card_y, card_w, (card_h * 0.07).round()),
+            name: (1337.0, 121.0, 434.0, 55.0),
             level: (
                 card_x + (card_w * 0.060).round(),
                 card_y + (card_h * 0.367).round(),
@@ -53,12 +56,9 @@ impl WeaponOcrRegions {
                 (card_w * 0.25).round(),
                 (card_h * 0.038).round(),
             ),
-            equip: (
-                card_x + (card_w * 0.10).round(),
-                card_y + (card_h * 0.935).round(),
-                (card_w * 0.85).round(),
-                (card_h * 0.06).round(),
-            ),
+            // Equip text "CharName已装备" at bottom of card area.
+            // Narrowed to skip avatar icon on left and excess space on right.
+            equip: (1386.0, 905.0, 315.0, 50.0),
         }
     }
 }
@@ -142,10 +142,17 @@ impl GoodWeaponScanner {
         ocr_regions: &WeaponOcrRegions,
         mappings: &MappingManager,
         config: &GoodWeaponScannerConfig,
+        item_index: usize,
     ) -> Result<WeaponScanResult> {
+        use crate::scanner::good_common::debug_dump::DumpCtx;
+        use super::super::good_common::constants::{WEAPON_LOCK_POS1, STAR_Y};
+
         // OCR weapon name
         let name_text = Self::ocr_image_region(ocr, image, ocr_regions.name, scaler)?;
         let weapon_key = fuzzy_match_map(&name_text, &mappings.weapon_name_map);
+        if config.verbose {
+            info!("[weapon] name OCR: {:?} -> {:?}", name_text, weapon_key);
+        }
 
         if weapon_key.is_none() {
             // Check if it's a stop-signal weapon/material
@@ -181,11 +188,28 @@ impl GoodWeaponScanner {
         // OCR equip status
         let equip_text = Self::ocr_image_region(ocr, image, ocr_regions.equip, scaler)?;
         let location = Self::parse_equip_location(&equip_text, mappings);
+        if !equip_text.is_empty() {
+            info!("[weapon] {} equip OCR: {:?} -> {:?}", weapon_key, equip_text, location);
+        }
 
         // Pixel-based detections
         let rarity = pixel_utils::detect_weapon_rarity(image, scaler);
         let lock = pixel_utils::detect_weapon_lock(image, scaler);
         let ascension = level_to_ascension(level, ascended);
+
+        // Dump all OCR and pixel-check regions
+        if config.dump_images {
+            let ctx = DumpCtx::new("debug_images", "weapons", item_index, &weapon_key);
+            ctx.dump_full(image);
+            ctx.dump_region("name", image, ocr_regions.name, scaler);
+            ctx.dump_region("level", image, ocr_regions.level, scaler);
+            ctx.dump_region("refinement", image, ocr_regions.refinement, scaler);
+            ctx.dump_region("equip", image, ocr_regions.equip, scaler);
+            ctx.dump_pixel("star5_px", image, (1485.0, STAR_Y), 10, scaler);
+            ctx.dump_pixel("star4_px", image, (1450.0, STAR_Y), 10, scaler);
+            ctx.dump_pixel("star3_px", image, (1416.0, STAR_Y), 10, scaler);
+            ctx.dump_pixel("lock_px", image, (WEAPON_LOCK_POS1.0, WEAPON_LOCK_POS1.1), 10, scaler);
+        }
 
         Ok(WeaponScanResult::Weapon(GoodWeapon {
             key: weapon_key,
@@ -198,30 +222,108 @@ impl GoodWeaponScanner {
         }))
     }
 
+    /// Valid level caps for weapons.
+    const VALID_MAX_LEVELS: &'static [i32] = &[20, 40, 50, 60, 70, 80, 90];
+
+    /// Snap a raw max-level value to the nearest valid cap.
+    fn snap_max_level(raw: i32) -> i32 {
+        Self::VALID_MAX_LEVELS
+            .iter()
+            .copied()
+            .min_by_key(|&v| (v - raw).unsigned_abs())
+            .unwrap_or(raw)
+    }
+
+    /// Try to split a digit string into (level, max) pair.
+    fn try_split_digits(digits: &str) -> Option<(i32, i32)> {
+        for i in (1..digits.len()).rev() {
+            if let (Ok(lv), Ok(mx)) = (digits[..i].parse::<i32>(), digits[i..].parse::<i32>()) {
+                if (1..=90).contains(&lv) && (10..=90).contains(&mx) && mx >= lv {
+                    return Some((lv, mx));
+                }
+            }
+        }
+        None
+    }
+
     /// Parse weapon level from "XX/YY" or "Lv.X" format.
     /// Returns (level, ascended).
+    ///
+    /// Uses the same multi-stage parsing as character level:
+    /// 1. Try "digits/digits" with slash
+    /// 2. Extract all digits, try split
+    /// 3. Remove one noise char and retry (OCR drops "/" → concatenated digits)
+    /// 4. Partial extract (level only)
     fn parse_weapon_level(text: &str) -> (i32, bool) {
         if text.is_empty() {
             return (1, false);
         }
 
+        // Phase 0: "XX/YY" with explicit slash
         let slash_re = Regex::new(r"(\d+)\s*/\s*(\d+)").unwrap();
         if let Some(caps) = slash_re.captures(text) {
             let level: i32 = caps[1].parse().unwrap_or(1);
             let raw_max: i32 = caps[2].parse().unwrap_or(20);
-            let max_level = ((raw_max as f64 / 10.0).round() * 10.0) as i32;
+            let max_level = Self::snap_max_level(raw_max);
             let ascended = level >= 20 && level < max_level;
             return (level, ascended);
         }
 
+        // Extract all digit chars
+        let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            return (1, false);
+        }
+
+        // Phase 1: direct split of all digits
+        if let Some((lv, mx)) = Self::try_split_digits(&digits) {
+            let max_level = Self::snap_max_level(mx);
+            let ascended = lv >= 20 && lv < max_level;
+            warn!("[weapon] level OCR direct split: {:?} -> {}/{}", text, lv, max_level);
+            return (lv, ascended);
+        }
+
+        // Phase 2: remove one noise char at each position, prefer mid-string
+        {
+            let mid = digits.len() as f64 / 2.0;
+            let mut best: Option<(i32, i32, usize, f64)> = None;
+            for remove_idx in 0..digits.len() {
+                let reduced: String = digits
+                    .char_indices()
+                    .filter(|&(i, _)| i != remove_idx)
+                    .map(|(_, c)| c)
+                    .collect();
+                if let Some((lv, mx)) = Self::try_split_digits(&reduced) {
+                    let dist = (remove_idx as f64 - mid).abs();
+                    if best.is_none() || dist < best.unwrap().3 {
+                        best = Some((lv, mx, remove_idx, dist));
+                    }
+                }
+            }
+            if let Some((lv, mx, idx, _)) = best {
+                let max_level = Self::snap_max_level(mx);
+                let ascended = lv >= 20 && lv < max_level;
+                warn!("[weapon] level OCR noise-remove: {:?} (rm idx {}) -> {}/{}", text, idx, lv, max_level);
+                return (lv, ascended);
+            }
+        }
+
+        // Phase 3: partial extract — just the level number
         let lv_re = Regex::new(r"(?i)[Ll][Vv]\.?\s*(\d+)").unwrap();
         if let Some(caps) = lv_re.captures(text) {
             let level: i32 = caps[1].parse().unwrap_or(1);
+            warn!("[weapon] level OCR partial (Lv): {:?} -> {}", text, level);
             return (level, false);
         }
 
-        let level = navigation::parse_number_from_text(text);
-        (if level > 0 { level } else { 1 }, false)
+        let level: i32 = digits.parse().unwrap_or(0);
+        if (1..=90).contains(&level) {
+            warn!("[weapon] level OCR bare digits: {:?} -> {}", text, level);
+            return (level, false);
+        }
+
+        warn!("[weapon] level OCR failed: {:?}", text);
+        (1, false)
     }
 
     /// Parse refinement from text.
@@ -258,16 +360,39 @@ impl GoodWeaponScanner {
     }
 
     /// Parse equipped character from equip text.
+    ///
+    /// The OCR region captures text like "CharName已装备" with possible noise
+    /// prefix chars from card decorations (c, Y, ca, emojis, etc).
+    /// Also handles truncated "已装" when the region clips the right side.
     fn parse_equip_location(text: &str, mappings: &MappingManager) -> String {
-        if text.contains("\u{5DF2}\u{88C5}\u{5907}") {
+        // Check for "已装备" or truncated "已装"
+        let equip_marker = if text.contains("\u{5DF2}\u{88C5}\u{5907}") {
+            Some("\u{5DF2}\u{88C5}\u{5907}") // 已装备
+        } else if text.contains("\u{5DF2}\u{88C5}") {
+            Some("\u{5DF2}\u{88C5}") // 已装 (truncated)
+        } else {
+            None
+        };
+
+        if let Some(marker) = equip_marker {
             let char_name = text
-                .replace("\u{5DF2}\u{88C5}\u{5907}", "")
-                .replace([':', '\u{FF1A}', ' '], "")
+                .replace(marker, "")
+                .replace(['\u{5907}', ':', '\u{FF1A}', ' '], "") // also strip stray 备
                 .trim()
                 .to_string();
-            if !char_name.is_empty() {
-                return fuzzy_match_map(&char_name, &mappings.character_name_map)
-                    .unwrap_or_default();
+
+            // Strip leading ASCII noise (c, Y, n, etc.) and emojis from OCR
+            let cleaned: String = char_name
+                .trim_start_matches(|c: char| c.is_ascii() || !c.is_alphanumeric())
+                .to_string();
+
+            // Try cleaned name first, then original
+            for name in [&cleaned, &char_name] {
+                if !name.is_empty() {
+                    if let Some(key) = fuzzy_match_map(name, &mappings.character_name_map) {
+                        return key;
+                    }
+                }
             }
         }
         String::new()
@@ -288,6 +413,13 @@ impl GoodWeaponScanner {
         info!("[weapon] starting scan...");
         let now = SystemTime::now();
 
+        if !skip_open_backpack {
+            // Return to main world using BGI-style strategy:
+            // press Escape one at a time, verify after each press.
+            ctrl.focus_game_window();
+            ctrl.return_to_main_ui(8);
+        }
+
         let mut bp = BackpackScanner::new(ctrl);
 
         if !skip_open_backpack {
@@ -297,7 +429,23 @@ impl GoodWeaponScanner {
 
         // Create a temporary OCR model just for reading item count
         let count_ocr = ocr_factory::create_ocr_model(&self.config.ocr_backend)?;
-        let (_, total_count) = bp.read_item_count(count_ocr.as_ref())?;
+        let (current_count, _max_capacity) = bp.read_item_count(count_ocr.as_ref())?;
+
+        // If count is 0, try reopening backpack
+        let total_count = if current_count == 0 {
+            warn!("[weapon] count=0, reopening backpack...");
+            drop(bp);
+            ctrl.return_to_main_ui(4);
+            let mut bp2 = BackpackScanner::new(ctrl);
+            bp2.open_backpack(self.config.open_delay);
+            bp2.select_tab("weapon", self.config.delay_tab);
+            let (count, _) = bp2.read_item_count(count_ocr.as_ref())?;
+            drop(bp2);
+            bp = BackpackScanner::new(ctrl);
+            count
+        } else {
+            current_count
+        };
 
         if total_count == 0 {
             warn!("[weapon] no weapons in backpack");
@@ -337,6 +485,7 @@ impl GoodWeaponScanner {
                     &worker_ocr_regions,
                     &worker_mappings,
                     &worker_config,
+                    work_item.index,
                 )? {
                     WeaponScanResult::Weapon(weapon) => {
                         if weapon.rarity >= worker_config.min_rarity {
@@ -354,6 +503,7 @@ impl GoodWeaponScanner {
         let scan_config = BackpackScanConfig {
             delay_grid_item: self.config.delay_grid_item,
             delay_scroll: self.config.delay_scroll,
+            delay_after_panel: 100,
         };
 
         bp.scan_grid(

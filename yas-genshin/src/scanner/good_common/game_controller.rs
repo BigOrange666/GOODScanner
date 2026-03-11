@@ -95,6 +95,91 @@ impl GenshinGameController {
     }
 }
 
+// Return to main UI — adapted from BetterGenshinImpact's ReturnMainUiTask.
+// Press Escape one at a time, verify after each press, loop up to 8 times.
+impl GenshinGameController {
+    /// Check if the game appears to be in the main world (HUD visible, no menu open).
+    ///
+    /// Detects the Paimon icon button in the top-left corner. In the main world,
+    /// this area contains the bright Paimon icon. In any menu, it's covered by
+    /// the menu's dark background or header.
+    ///
+    /// Uses pixel brightness sampling — not as robust as template matching but
+    /// sufficient for the return-to-main-UI loop.
+    pub fn is_likely_main_world(&self) -> bool {
+        let image = match self.capture_game() {
+            Ok(img) => img,
+            Err(_) => return false,
+        };
+
+        // The Paimon icon at 1920x1080 is a bright white/cream circular button
+        // centered around (58, 50) with radius ~25px.
+        // Sample several points across the icon face area.
+        let check_points: &[(f64, f64)] = &[
+            (62.0, 51.0),  // Center of icon face
+            (53.0, 47.0),  // Inner-left
+            (49.0, 35.0),  // Upper portion
+            (55.0, 70.0),  // Lower portion
+            (67.0, 77.0),  // Lower-right
+        ];
+
+        let mut bright_count = 0;
+        for &(bx, by) in check_points {
+            let x = self.scaler.x(bx) as u32;
+            let y = self.scaler.y(by) as u32;
+            if x < image.width() && y < image.height() {
+                let p = image.get_pixel(x, y);
+                let brightness = (p[0] as u32 + p[1] as u32 + p[2] as u32) / 3;
+                if brightness > 160 {
+                    bright_count += 1;
+                }
+            }
+        }
+
+        bright_count >= 3
+    }
+
+    /// Return to the main world UI by pressing Escape one at a time and verifying.
+    ///
+    /// Adapted from BetterGenshinImpact's ReturnMainUiTask strategy:
+    /// 1. Check if already in main UI — if so, return immediately.
+    /// 2. Loop up to `max_attempts` times: press Escape, wait, check.
+    /// 3. Final fallback: press Enter (dismiss dialogs) then Escape.
+    ///
+    /// Returns true if main UI was detected, false if still uncertain.
+    pub fn return_to_main_ui(&mut self, max_attempts: u32) -> bool {
+        if self.is_likely_main_world() {
+            info!("[return_to_main_ui] already in main world");
+            return true;
+        }
+
+        for i in 0..max_attempts {
+            self.key_press(enigo::Key::Escape);
+            utils::sleep(900);
+
+            if self.is_likely_main_world() {
+                info!("[return_to_main_ui] reached main world after {} Escape(s)", i + 1);
+                return true;
+            }
+        }
+
+        // Fallback: Enter (dismiss any stuck dialog) + Escape
+        info!("[return_to_main_ui] fallback: Enter + Escape");
+        self.key_press(enigo::Key::Return);
+        utils::sleep(500);
+        self.key_press(enigo::Key::Escape);
+        utils::sleep(900);
+
+        let result = self.is_likely_main_world();
+        if result {
+            info!("[return_to_main_ui] reached main world after fallback");
+        } else {
+            log::warn!("[return_to_main_ui] may not be in main world after {} attempts + fallback", max_attempts);
+        }
+        result
+    }
+}
+
 // Navigation methods — all coordinates at 1920x1080 base, scaled by CoordScaler.
 impl GenshinGameController {
     /// Click at a position specified in base 1920x1080 coordinates.
@@ -172,6 +257,33 @@ impl GenshinGameController {
     ) -> Result<String> {
         let (x, y, w, h) = rect;
         self.ocr_region(ocr_model, (x, y + y_shift, w, h))
+    }
+}
+
+// Screenshot save helpers.
+impl GenshinGameController {
+    /// Save the full game window as a PNG file.
+    pub fn save_screenshot(&self, path: &str) -> Result<()> {
+        let im = self.capture_game()?;
+        im.save(path).map_err(|e| anyhow!("Failed to save screenshot: {}", e))?;
+        info!("[screenshot] saved full: {}", path);
+        Ok(())
+    }
+
+    /// Save a sub-region of the game window as a PNG file.
+    /// Coordinates are in base 1920x1080 and will be scaled.
+    pub fn save_region_screenshot(
+        &self,
+        path: &str,
+        base_x: f64,
+        base_y: f64,
+        base_w: f64,
+        base_h: f64,
+    ) -> Result<()> {
+        let im = self.capture_region(base_x, base_y, base_w, base_h)?;
+        im.save(path).map_err(|e| anyhow!("Failed to save screenshot: {}", e))?;
+        info!("[screenshot] saved region ({},{},{},{}) -> {}", base_x, base_y, base_w, base_h, path);
+        Ok(())
     }
 }
 

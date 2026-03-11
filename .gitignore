@@ -7,5 +7,8 @@ dumps/
 **/*.png
 **tmp**
 **/.DS_Store
+*.pyc
 data/
 scan_output/
+debug_images/
+diff_report.md

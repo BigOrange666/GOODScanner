@@ -48,17 +48,24 @@ pub fn fuzzy_match_map(text: &str, map: &HashMap<String, String>) -> Option<Stri
         return Some(val.clone());
     }
 
-    // Substring match (longest match wins)
+    // Substring match: prefer "cleaned contains map key" (OCR added noise around real name)
+    // over "map key contains cleaned" (OCR truncated the name).
     let mut best_match: Option<String> = None;
     let mut best_len: usize = 0;
 
     for (cn, val) in map.iter() {
-        // cleaned contains the map key
+        // cleaned contains the map key — OCR returned name + noise
         if cleaned.contains(cn.as_str()) && cn.len() > best_len {
             best_match = Some(val.clone());
             best_len = cn.len();
         }
-        // map key contains cleaned
+    }
+    if best_match.is_some() {
+        return best_match;
+    }
+
+    // Fallback: map key contains cleaned — OCR truncated the name
+    for (cn, val) in map.iter() {
         if cn.contains(cleaned.as_str()) && cleaned.len() > best_len {
             best_match = Some(val.clone());
             best_len = cleaned.len();

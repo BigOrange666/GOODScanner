@@ -194,6 +194,10 @@ pub struct GoodScannerConfig {
     /// Number of re-scan iterations (0 = infinite until RMB)
     #[arg(long = "good-debug-rescan-count", help = "Number of re-scan iterations (0=infinite)", default_value_t = 1)]
     pub debug_rescan_count: usize,
+
+    /// Dump all OCR/pixel-check regions as images to debug_images/ folder
+    #[arg(long = "good-dump-images", help = "Dump OCR region screenshots to debug_images/")]
+    pub dump_images: bool,
 }
 
 pub struct GoodScannerApplication {
@@ -305,6 +309,7 @@ impl GoodScannerApplication {
             if let Some(ref backend) = config.ocr_backend {
                 char_config.ocr_backend = backend.clone();
             }
+            if config.dump_images { char_config.dump_images = true; }
             let scanner = GoodCharacterScanner::new(
                 char_config,
                 mappings.clone(),
@@ -319,9 +324,10 @@ impl GoodScannerApplication {
             info!("Scanned {} characters", result.len());
             characters = Some(result);
 
-            // Return to main UI before next scan
-            ctrl.key_press(enigo::Key::Escape);
-            yas::utils::sleep(1000);
+            // Return to main UI before next scan (BGI-style).
+            // The character scanner already presses Escape to close its screen,
+            // but return_to_main_ui verifies we actually reached main world.
+            ctrl.return_to_main_ui(4);
         }
 
         // Scan weapons
@@ -331,6 +337,7 @@ impl GoodScannerApplication {
             if let Some(ref backend) = config.ocr_backend {
                 weapon_config.ocr_backend = backend.clone();
             }
+            if config.dump_images { weapon_config.dump_images = true; }
             let scanner = GoodWeaponScanner::new(
                 weapon_config,
                 mappings.clone(),
@@ -353,6 +360,7 @@ impl GoodScannerApplication {
             if let Some(ref backend) = config.ocr_backend {
                 artifact_config.ocr_backend = backend.clone();
             }
+            if config.dump_images { artifact_config.dump_images = true; }
             // If weapons were just scanned, we're already in the backpack
             let skip_open = scan_weapons;
             let scanner = GoodArtifactScanner::new(

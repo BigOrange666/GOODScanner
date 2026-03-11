@@ -12,3 +12,5 @@ pub mod ocr_factory;
 pub mod ocr_pool;
 pub mod scan_worker;
 pub mod diff;
+pub mod debug_dump;
+pub mod roll_solver;

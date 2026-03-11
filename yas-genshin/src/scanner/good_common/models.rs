@@ -8,6 +8,10 @@ pub struct GoodCharacter {
     pub constellation: i32,
     pub ascension: i32,
     pub talent: GoodTalent,
+    /// Element for multi-element characters (Traveler, Manekin, Manekina).
+    /// Only serialized when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,13 +54,20 @@ pub struct GoodArtifact {
     pub elixir_crafted: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "unactivatedSubstats")]
     pub unactivated_substats: Vec<GoodSubStat>,
+    /// Total number of substat rolls (initial + upgrades). Set by the roll solver.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "totalRolls")]
+    pub total_rolls: Option<i32>,
 }
 
-/// Substat in GOOD v3 format. Extra fields (e.g. initialValue) are ignored.
+/// Substat in GOOD v3 format.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GoodSubStat {
     pub key: String,
     pub value: f64,
+    /// Value of the initial roll (before upgrades). Set by the roll solver
+    /// when the substat has exactly 1 roll (i.e., the value IS the initial roll).
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "initialValue")]
+    pub initial_value: Option<f64>,
 }
 
 /// GOOD v3 full export

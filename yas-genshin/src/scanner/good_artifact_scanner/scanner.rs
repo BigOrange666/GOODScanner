@@ -20,7 +20,8 @@ use crate::scanner::good_common::ocr_factory;
 use crate::scanner::good_common::ocr_pool::OcrPool;
 use crate::scanner::good_common::pixel_utils;
 use crate::scanner::good_common::scan_worker::{self, WorkItem};
-use crate::scanner::good_common::stat_parser;
+use crate::scanner::good_common::roll_solver::{self, OcrCandidate, SolverInput};
+use crate::scanner::good_common::stat_parser::{self, ParsedStat};
 
 /// Computed OCR regions for artifact card (at 1920x1080 base).
 ///
@@ -37,7 +38,6 @@ struct ArtifactOcrRegions {
     set_name_base_y: f64,
     set_name_h: f64,
     equip: (f64, f64, f64, f64),
-    elixir: (f64, f64, f64, f64),
 }
 
 impl ArtifactOcrRegions {
@@ -47,28 +47,15 @@ impl ArtifactOcrRegions {
         let card_w: f64 = 494.0;
         let card_h: f64 = 841.0;
 
-        // Substat regions derived from old window_info (2560x1440 * 0.75):
-        //   left=1356, width=255
-        //   line 1: top=478, h=35
-        //   line 2: top=513, h=37
-        //   line 3: top=550, h=39
-        //   line 4: top=589, h=39
+        // Substat regions (width calibrated at 255px — wider causes OCR failures)
+        // Sub3 (4th line) is wider (355px) to capture "(待激活)" text on unactivated substats
         let sub_x = 1356.0;
         let sub_w = 255.0;
+        let sub3_w = 355.0;
 
         Self {
-            part_name: (
-                card_x + (card_w * 0.0405).round(),
-                card_y + (card_h * 0.0772).round(),
-                (card_w * 0.4757).round(),
-                (card_h * 0.0475).round(),
-            ),
-            main_stat: (
-                card_x + (card_w * 0.0405).round(),
-                card_y + (card_h * 0.1722).round(),
-                (card_w * 0.4555).round(),
-                (card_h * 0.0416).round(),
-            ),
+            part_name: (1327.0, 184.0, 155.0, 40.0),
+            main_stat: (1327.0, 266.0, 155.0, 35.0),
             level: (
                 card_x + (card_w * 0.0506).round(),
                 card_y + (card_h * 0.3634).round(),
@@ -79,19 +66,14 @@ impl ArtifactOcrRegions {
                 (sub_x, 478.0, sub_w, 35.0),
                 (sub_x, 513.0, sub_w, 37.0),
                 (sub_x, 550.0, sub_w, 39.0),
-                (sub_x, 589.0, sub_w, 39.0),
+                (sub_x, 589.0, sub3_w, 39.0),
             ],
             set_name_x: 1330.0,
             set_name_w: 280.0,
             set_name_base_y: 625.0,
             set_name_h: 45.0,
-            equip: (
-                card_x + (card_w * 0.10).round(),
-                card_y + (card_h * 0.935).round(),
-                (card_w * 0.85).round(),
-                (card_h * 0.06).round(),
-            ),
-            elixir: (1360.0, 410.0, 140.0, 26.0),
+            // Equip text "CharName已装备" — narrowed to skip avatar icon on left.
+            equip: (1386.0, 905.0, 315.0, 50.0),
         }
     }
 }
@@ -290,17 +272,20 @@ impl GoodArtifactScanner {
     /// Used as a retry when the full line OCR truncates the decimal value.
     /// By cropping to just the number, each character gets more pixels in the
     /// model's fixed-width input, improving decimal point recognition.
-    fn ocr_substat_number_retry(
+    /// OCR the number portion of a substat line with configurable crop.
+    /// `left_frac` is how much of the left side to skip (0.0-1.0).
+    /// Upscales 2x before OCR for better digit recognition on small text.
+    fn ocr_substat_number_crop(
         ocr: &dyn ImageToText<RgbImage>,
         image: &RgbImage,
         rect: (f64, f64, f64, f64),
         y_shift: f64,
         scaler: &CoordScaler,
+        left_frac: f64,
     ) -> Result<String> {
         let (bx, by, bw, bh) = rect;
-        // Crop to right 60% of the line (stat value + % area)
-        let num_x = bx + bw * 0.40;
-        let num_w = bw * 0.60;
+        let num_x = bx + bw * left_frac;
+        let num_w = bw * (1.0 - left_frac);
         let x = scaler.x(num_x) as u32;
         let y = scaler.y(by + y_shift) as u32;
         let w = scaler.x(num_w) as u32;
@@ -316,7 +301,14 @@ impl GoodArtifactScanner {
         }
 
         let sub = image.view(x, y, w, h).to_image();
-        let text = ocr.image_to_text(&sub, false)?;
+        // Upscale 2x for better OCR on small text
+        let scaled = image::imageops::resize(
+            &sub,
+            w * 2,
+            h * 2,
+            image::imageops::FilterType::Lanczos3,
+        );
+        let text = ocr.image_to_text(&scaled, false)?;
         Ok(text.trim().to_string())
     }
 
@@ -379,33 +371,176 @@ impl GoodArtifactScanner {
         None
     }
 
-    /// Detect elixir crafted status from OCR.
+    /// Detect elixir crafted status via multi-pixel color check.
+    /// Elixir artifacts have a purple banner with color ~(220, 192, 255).
+    /// Normal artifacts have beige background ~(236, 229, 216) at that position.
+    /// Checks 3 positions in the solid right-side region of the banner to avoid
+    /// false positives from decorative text patterns or transient overlays.
     fn detect_elixir_crafted(
-        ocr: &dyn ImageToText<RgbImage>,
         image: &RgbImage,
-        elixir_rect: (f64, f64, f64, f64),
         scaler: &CoordScaler,
-    ) -> Result<bool> {
-        let text = Self::ocr_image_region(ocr, image, elixir_rect, scaler)?;
-        // "祝圣" = elixir
-        Ok(text.contains("\u{795D}\u{5723}"))
+    ) -> bool {
+        let positions: [(f64, f64); 3] = [
+            (1510.0, 423.0),
+            (1520.0, 423.0),
+            (1530.0, 423.0),
+        ];
+        let mut purple_count = 0;
+        for &(bx, by) in &positions {
+            let x = scaler.scale_x(bx) as u32;
+            let y = scaler.scale_y(by) as u32;
+            if x >= image.width() || y >= image.height() {
+                continue;
+            }
+            let px = image.get_pixel(x, y);
+            // Purple banner: blue > 230, blue > green + 40
+            // Beige background: all channels similar, blue ≈ green
+            let is_purple = px[2] > 230 && px[2] > px[1] + 40;
+            if is_purple {
+                purple_count += 1;
+            }
+        }
+        purple_count >= 2
     }
 
     /// Parse equipped character from equip text.
     fn parse_equip_location(text: &str, mappings: &MappingManager) -> String {
-        if text.contains("\u{5DF2}\u{88C5}\u{5907}") {
-            // "已装备"
+        // Check for "已装备" or truncated "已装"
+        let equip_marker = if text.contains("\u{5DF2}\u{88C5}\u{5907}") {
+            Some("\u{5DF2}\u{88C5}\u{5907}") // 已装备
+        } else if text.contains("\u{5DF2}\u{88C5}") {
+            Some("\u{5DF2}\u{88C5}") // 已装 (truncated)
+        } else {
+            None
+        };
+
+        if let Some(marker) = equip_marker {
             let char_name = text
-                .replace("\u{5DF2}\u{88C5}\u{5907}", "")
-                .replace([':', '\u{FF1A}', ' '], "")
+                .replace(marker, "")
+                .replace(['\u{5907}', ':', '\u{FF1A}', ' '], "")
                 .trim()
                 .to_string();
-            if !char_name.is_empty() {
-                return fuzzy_match_map(&char_name, &mappings.character_name_map)
-                    .unwrap_or_default();
+
+            // Strip leading ASCII noise and emojis from OCR
+            let cleaned: String = char_name
+                .trim_start_matches(|c: char| c.is_ascii() || !c.is_alphanumeric())
+                .to_string();
+
+            for name in [&cleaned, &char_name] {
+                if !name.is_empty() {
+                    if let Some(key) = fuzzy_match_map(name, &mappings.character_name_map) {
+                        return key;
+                    }
+                }
             }
         }
         String::new()
+    }
+
+    /// Merge dual-engine OCR results for a single substat line.
+    ///
+    /// Returns (chosen_text, chosen_parsed).
+    /// - If only one engine parsed, use that.
+    /// - If both parsed to the same stat key: prefer the one with a decimal
+    ///   (more complete format for percent stats), or the larger value.
+    /// - If they disagree on stat key, prefer engine 1 (primary).
+    fn merge_dual_ocr_stats<'a>(
+        text1: &'a str,
+        parsed1: Option<ParsedStat>,
+        text2: &'a str,
+        parsed2: Option<ParsedStat>,
+    ) -> (&'a str, Option<ParsedStat>) {
+        match (parsed1, parsed2) {
+            (Some(p1), Some(p2)) => {
+                if p1.key == p2.key {
+                    // Same stat key — pick better value
+                    let has_dec1 = p1.value != (p1.value as i64) as f64;
+                    let has_dec2 = p2.value != (p2.value as i64) as f64;
+                    if has_dec1 && !has_dec2 {
+                        // Engine 1 has decimal, engine 2 doesn't → prefer 1
+                        (text1, Some(p1))
+                    } else if has_dec2 && !has_dec1 {
+                        // Engine 2 has decimal, engine 1 doesn't → prefer 2
+                        (text2, Some(p2))
+                    } else {
+                        // Both have decimals or both don't → pick larger value
+                        if p2.value > p1.value {
+                            (text2, Some(p2))
+                        } else {
+                            (text1, Some(p1))
+                        }
+                    }
+                } else {
+                    // Different stat keys — prefer engine 1 (primary)
+                    (text1, Some(p1))
+                }
+            }
+            (Some(p1), None) => (text1, Some(p1)),
+            (None, Some(p2)) => (text2, Some(p2)),
+            (None, None) => {
+                // Neither parsed — return whichever has more content
+                if text2.len() > text1.len() {
+                    (text2, None)
+                } else {
+                    (text1, None)
+                }
+            }
+        }
+    }
+
+    /// OCR one substat line with both engines and return candidates.
+    ///
+    /// Each engine tries direct OCR first, then icon-masked fallback.
+    /// Returns (candidates, stop_marker_hit) where stop_marker_hit is true
+    /// if "2件套" was detected.
+    fn ocr_substat_line_candidates(
+        ocr: &dyn ImageToText<RgbImage>,
+        substat_ocr: &dyn ImageToText<RgbImage>,
+        image: &RgbImage,
+        sub_rect: (f64, f64, f64, f64),
+        y_shift: f64,
+        scaler: &CoordScaler,
+    ) -> (Vec<OcrCandidate>, bool) {
+        let mut candidates = Vec::new();
+
+        // Helper: best OCR text from one engine (direct + masked fallback)
+        let ocr_with_fallback = |engine: &dyn ImageToText<RgbImage>| -> String {
+            let text = Self::ocr_image_region_shifted(engine, image, sub_rect, y_shift, scaler)
+                .unwrap_or_default();
+            if stat_parser::parse_stat_from_text(&text).is_some() {
+                return text;
+            }
+            let masked = Self::ocr_image_region_shifted_masked(engine, image, sub_rect, y_shift, scaler)
+                .unwrap_or_default();
+            if stat_parser::parse_stat_from_text(&masked).is_some() {
+                return masked;
+            }
+            let cn = |s: &str| s.chars().filter(|c| *c >= '\u{4E00}' && *c <= '\u{9FFF}').count();
+            if cn(&masked) > cn(&text) { masked } else { text }
+        };
+
+        let text1 = ocr_with_fallback(substat_ocr);
+        let text2 = ocr_with_fallback(ocr);
+
+        // Check for stop marker in either text
+        let stop = text1.contains("2\u{4EF6}\u{5957}") || text2.contains("2\u{4EF6}\u{5957}");
+        if stop || (text1.trim().len() < 2 && text2.trim().len() < 2) {
+            return (candidates, stop);
+        }
+
+        // Parse both and collect candidates (including inactive/待激活 substats)
+        if let Some(p1) = stat_parser::parse_stat_from_text(text1.trim()) {
+            candidates.push(OcrCandidate { key: p1.key, value: p1.value, inactive: p1.inactive });
+        }
+        if let Some(p2) = stat_parser::parse_stat_from_text(text2.trim()) {
+            // Only add if different from first candidate
+            let dominated = candidates.iter().any(|c| c.key == p2.key && (c.value - p2.value).abs() < 0.01);
+            if !dominated {
+                candidates.push(OcrCandidate { key: p2.key, value: p2.value, inactive: p2.inactive });
+            }
+        }
+
+        (candidates, false)
     }
 
     /// Scan a single artifact from a captured game image.
@@ -413,12 +548,17 @@ impl GoodArtifactScanner {
     /// This is called from the worker thread with a checked-out OCR model.
     fn scan_single_artifact(
         ocr: &dyn ImageToText<RgbImage>,
+        substat_ocr: &dyn ImageToText<RgbImage>,
         image: &RgbImage,
         scaler: &CoordScaler,
         ocr_regions: &ArtifactOcrRegions,
         mappings: &MappingManager,
         config: &GoodArtifactScannerConfig,
+        item_index: usize,
     ) -> Result<ArtifactScanResult> {
+        use crate::scanner::good_common::debug_dump::DumpCtx;
+        use super::super::good_common::constants::{ARTIFACT_LOCK_POS1, ARTIFACT_ASTRAL_POS1, STAR_Y};
+
         // 0. Detect rarity — stop on 3-star or below
         let rarity = pixel_utils::detect_artifact_rarity(image, scaler);
         if rarity <= 3 {
@@ -472,110 +612,251 @@ impl GoodArtifactScanner {
         };
 
         // 3. Detect elixir crafted
-        let elixir_crafted = Self::detect_elixir_crafted(ocr, image, ocr_regions.elixir, scaler)?;
+        let elixir_crafted = Self::detect_elixir_crafted(image, scaler);
         let y_shift = if elixir_crafted { ELIXIR_SHIFT } else { 0.0 };
 
-        // 4. Level
-        let level_text = Self::ocr_image_region_shifted(ocr, image, ocr_regions.level, y_shift, scaler)?;
-        let level = {
-            let re = Regex::new(r"\+?\s*(\d+)").unwrap();
-            re.captures(&level_text)
-                .and_then(|c| c[1].parse::<i32>().ok())
-                .unwrap_or(0)
+        // Create dump context now that we know slot and y_shift
+        let dump = if config.dump_images {
+            let ctx = DumpCtx::new("debug_images", "artifacts", item_index, &slot_key);
+            ctx.dump_full(image);
+            ctx.dump_region("name", image, ocr_regions.part_name, scaler);
+            ctx.dump_region("main_stat", image, ocr_regions.main_stat, scaler);
+            ctx.dump_pixel("elixir_px", image, (1520.0, 423.0), 10, scaler);
+            ctx.dump_region_shifted("level", image, ocr_regions.level, y_shift, scaler);
+            for i in 0..4 {
+                ctx.dump_region_shifted(
+                    &format!("sub{}", i), image, ocr_regions.substat_lines[i], y_shift, scaler,
+                );
+            }
+            let set_rect = (ocr_regions.set_name_x, ocr_regions.set_name_base_y + y_shift,
+                            ocr_regions.set_name_w, ocr_regions.set_name_h);
+            ctx.dump_region("set_name", image, set_rect, scaler);
+            ctx.dump_region("equip", image, ocr_regions.equip, scaler);
+            // Pixel check regions (±10px)
+            ctx.dump_pixel("star5_px", image, (1485.0, STAR_Y), 10, scaler);
+            ctx.dump_pixel("star4_px", image, (1450.0, STAR_Y), 10, scaler);
+            ctx.dump_pixel("lock_px", image,
+                (ARTIFACT_LOCK_POS1.0, ARTIFACT_LOCK_POS1.1 + y_shift), 10, scaler);
+            ctx.dump_pixel("astral_px", image,
+                (ARTIFACT_ASTRAL_POS1.0, ARTIFACT_ASTRAL_POS1.1 + y_shift), 10, scaler);
+            let (_, sub4_y, _, sub4_h) = ocr_regions.substat_lines[3];
+            ctx.dump_region_shifted(
+                "inactive_check", image, (1565.0, sub4_y, 160.0, sub4_h), y_shift, scaler,
+            );
+            Some(ctx)
+        } else {
+            None
         };
+        let _ = dump; // suppress unused warning for now
 
-        // 5. Substats — read each line individually (PaddleOCR is single-line)
-        let mut substats: Vec<GoodSubStat> = Vec::new();
-        let mut unactivated_substats: Vec<GoodSubStat> = Vec::new();
+        // 4. Level — dual-engine OCR, collect both for solver
+        let re = Regex::new(r"\+?\s*(\d+)").unwrap();
+        let parse_level = |text: &str| -> i32 {
+            re.captures(text)
+                .and_then(|c| c[1].parse::<i32>().ok())
+                .filter(|&v| v <= 20)
+                .unwrap_or(-1)
+        };
+        let level_text1 = Self::ocr_image_region_shifted(ocr, image, ocr_regions.level, y_shift, scaler)
+            .unwrap_or_default();
+        let lv1 = parse_level(&level_text1);
+
+        let level_text2 = Self::ocr_image_region_shifted(substat_ocr, image, ocr_regions.level, y_shift, scaler)
+            .unwrap_or_default();
+        let lv2 = parse_level(&level_text2);
+
+        let level = if lv1 >= 0 && lv2 >= 0 {
+            lv1.max(lv2)
+        } else if lv1 >= 0 {
+            lv1
+        } else if lv2 >= 0 {
+            lv2
+        } else {
+            0
+        };
+        if lv1 != lv2 && config.verbose {
+            info!("[artifact] level dual-OCR: engine1=「{}」→{} engine2=「{}」→{} → {}",
+                level_text1.trim(), lv1, level_text2.trim(), lv2, level);
+        }
+
+        // 5. Substats — dual-engine OCR, collect candidates, solve with roll validator.
+        //
+        // Phase 1: OCR both engines on each line, collect candidates for the solver.
+        // Phase 2: Run roll solver to validate/select the correct combination.
+        // Phase 3: If solver fails, retry with progressively cropped substat widths.
+        // Phase 4: If still unsolved, fall back to heuristic merge.
+        let mut solver_candidates: Vec<Vec<OcrCandidate>> = Vec::new();
+        let mut level_candidates: Vec<i32> = Vec::new();
+        if lv1 >= 0 { level_candidates.push(lv1); }
+        if lv2 >= 0 && lv2 != lv1 { level_candidates.push(lv2); }
+        if level_candidates.is_empty() { level_candidates.push(0); }
+
+        // Phase 1: OCR at original width
         for i in 0..4 {
-            let (sub_x, sub_y, sub_w, sub_h) = ocr_regions.substat_lines[i];
-            // Try regular OCR first; if unparseable, retry with icon masking.
-            let line_text = {
-                let text = Self::ocr_image_region_shifted(
-                    ocr, image, (sub_x, sub_y, sub_w, sub_h), y_shift, scaler,
-                )?;
-                if stat_parser::parse_stat_from_text(&text).is_some() {
-                    text
-                } else {
-                    // Regular OCR failed — try with left-side icon masking
-                    let masked = Self::ocr_image_region_shifted_masked(
-                        ocr, image, (sub_x, sub_y, sub_w, sub_h), y_shift, scaler,
-                    )?;
-                    if stat_parser::parse_stat_from_text(&masked).is_some() {
-                        masked
-                    } else {
-                        // Neither worked — return the one with more Chinese chars
-                        let cn = |s: &str| s.chars().filter(|c| *c >= '\u{4E00}' && *c <= '\u{9FFF}').count();
-                        if cn(&masked) > cn(&text) { masked } else { text }
-                    }
-                }
-            };
-            let line = line_text.trim();
-            if config.verbose {
-                info!("[artifact] sub[{}] y={:.0} text=「{}」", i, sub_y + y_shift, line);
-            }
-            if line.len() < 2 {
-                continue;
-            }
-            // Stop at "2件套" marker
-            if line.contains("2\u{4EF6}\u{5957}") {
-                break;
-            }
-            if let Some(mut parsed) = stat_parser::parse_stat_from_text(line) {
-                // Retry on truncated percent values: OCR often drops digit after decimal.
-                // Only retry when there's evidence of truncation: "X.%" (dot directly before %)
-                // or "X.letter%" (OCR-corrupted digit after dot).
-                let has_truncation_evidence = line.contains(".%")
-                    || Regex::new(r"\.\D%").map_or(false, |re| re.is_match(line));
-                if parsed.key.ends_with('_') && has_truncation_evidence {
-                    // OCR just the number portion for better decimal recognition
-                    if let Ok(num_text) = Self::ocr_substat_number_retry(
-                        ocr, image, (sub_x, sub_y, sub_w, sub_h), y_shift, scaler,
-                    ) {
-                        let num_text = num_text.trim();
-                        // Extract number from the retry text
-                        if let Some(retry_val) = stat_parser::extract_number(num_text) {
-                            // Accept retry if: has decimal part, within same magnitude as original,
-                            // and the integer part is close (within ±1 or same).
-                            let has_decimal = retry_val != (retry_val as i64) as f64;
-                            let orig_int = parsed.value as i64;
-                            let retry_int = retry_val as i64;
-                            // The retry crops the right portion, so it might see "1.7" from "11.7"
-                            // Accept if retry integer part matches original, or if original was
-                            // wrong and retry captures the last digit(s).
-                            let close_enough = (retry_int - orig_int).abs() <= 1
-                                || retry_val > (parsed.value * 0.8) && retry_val < (parsed.value * 1.3);
-                            if has_decimal && retry_val > 0.5 && retry_val < 100.0 && close_enough {
-                                info!("[artifact] sub[{}] decimal recovered: {} → {} (retry=「{}」)", i, parsed.value, retry_val, num_text);
-                                parsed.value = retry_val;
+            let sub_rect = ocr_regions.substat_lines[i];
+            let (cands, stop) = Self::ocr_substat_line_candidates(
+                ocr, substat_ocr, image, sub_rect, y_shift, scaler,
+            );
+            if stop { break; }
+
+            // Also try number-only OCR for additional value candidates
+            let (sub_x, sub_y, sub_w, sub_h) = sub_rect;
+            for c in &cands {
+                let is_pct = c.key.ends_with('_');
+                let crop_frac = if is_pct { 0.40 } else { 0.25 };
+                if let Ok(num_text) = Self::ocr_substat_number_crop(
+                    substat_ocr, image, (sub_x, sub_y, sub_w, sub_h), y_shift, scaler, crop_frac,
+                ) {
+                    if let Some(retry_val) = stat_parser::extract_number(num_text.trim()) {
+                        if (retry_val - c.value).abs() > 0.01 && retry_val > 0.5 {
+                            // Add as additional candidate with same key
+                            let mut extended = cands.clone();
+                            let already = extended.iter().any(|e| e.key == c.key && (e.value - retry_val).abs() < 0.01);
+                            if !already {
+                                extended.push(OcrCandidate { key: c.key.clone(), value: retry_val, inactive: c.inactive });
                             }
+                            solver_candidates.push(extended);
+                            // Skip the normal push below
+                            continue;
                         }
                     }
-                    if parsed.value == (parsed.value as i64) as f64 {
-                        warn!("[artifact] sub[{}] truncation? key={} val={} raw=「{}」", i, parsed.key, parsed.value, line);
-                    }
                 }
-                let sub = GoodSubStat {
-                    key: parsed.key,
-                    value: parsed.value,
-                };
-                // Check if inactive: rely on OCR detecting "待激活" text.
-                // Pixel brightness detection was too unreliable (326+ false positives),
-                // so we use only the OCR text and level-0 inference (below).
-                let is_inactive = parsed.inactive;
-                if is_inactive {
-                    unactivated_substats.push(sub);
-                } else {
-                    substats.push(sub);
-                }
-            } else {
-                warn!("[artifact] sub[{}] unparseable: 「{}」", i, line);
+            }
+            // If we didn't extend above (or no number retry), push original candidates
+            if solver_candidates.len() <= i {
+                solver_candidates.push(cands);
+            }
+
+            if config.verbose {
+                let cand_str: Vec<String> = solver_candidates.last().unwrap()
+                    .iter().map(|c| format!("{}={}", c.key, c.value)).collect();
+                info!("[artifact] sub[{}] candidates: [{}]", i, cand_str.join(", "));
             }
         }
 
-        // Note: level-0 inference was removed. The groundtruth treats level-0
-        // artifacts with 4 substats as all-active, so we shouldn't infer
-        // unactivated status from level alone.
+        // Filter out empty candidate lines (OCR failures) — the solver doesn't
+        // care which physical line a substat came from, only the candidate sets.
+        let non_empty_candidates: Vec<Vec<OcrCandidate>> = solver_candidates.iter()
+            .filter(|c| !c.is_empty())
+            .cloned()
+            .collect();
+
+        // Phase 2: Try the roll solver
+        let solver_input = SolverInput {
+            rarity,
+            level_candidates: level_candidates.clone(),
+            substat_candidates: non_empty_candidates.clone(),
+        };
+        let mut solved = roll_solver::solve(&solver_input);
+
+        // Phase 3: If solver failed, retry with progressively cropped widths.
+        // Remove 10px from right side of each substat region per attempt.
+        if solved.is_none() {
+            for crop_attempt in 1..=2 {
+                let crop_px = crop_attempt as f64 * 10.0;
+                let mut retry_candidates = solver_candidates.clone();
+
+                for i in 0..retry_candidates.len().min(4) {
+                    let (sub_x, sub_y, sub_w, sub_h) = ocr_regions.substat_lines[i];
+                    let cropped_rect = (sub_x, sub_y, sub_w - crop_px, sub_h);
+                    let (new_cands, _) = Self::ocr_substat_line_candidates(
+                        ocr, substat_ocr, image, cropped_rect, y_shift, scaler,
+                    );
+                    // Add new candidates to existing ones (deduplicated)
+                    for nc in new_cands {
+                        let exists = retry_candidates[i].iter().any(|c|
+                            c.key == nc.key && (c.value - nc.value).abs() < 0.01
+                        );
+                        if !exists {
+                            retry_candidates[i].push(nc);
+                        }
+                    }
+                }
+
+                let retry_non_empty: Vec<Vec<OcrCandidate>> = retry_candidates.iter()
+                    .filter(|c| !c.is_empty())
+                    .cloned()
+                    .collect();
+                let retry_input = SolverInput {
+                    rarity,
+                    level_candidates: level_candidates.clone(),
+                    substat_candidates: retry_non_empty,
+                };
+                solved = roll_solver::solve(&retry_input);
+                if solved.is_some() {
+                    if config.verbose {
+                        info!("[artifact] solver succeeded on crop attempt {} (-{}px)", crop_attempt, crop_px);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Build substats from solver result or fall back to heuristic merge
+        let (mut substats, mut unactivated_substats, total_rolls) = if let Some(ref result) = solved {
+            let mut subs = Vec::new();
+            let mut unact = Vec::new();
+            for s in &result.substats {
+                let sub = GoodSubStat {
+                    key: s.key.clone(),
+                    value: s.value,
+                    initial_value: s.initial_value,
+                };
+                if s.inactive {
+                    unact.push(sub);
+                } else {
+                    subs.push(sub);
+                }
+            }
+            if config.verbose {
+                let roll_str: Vec<String> = result.substats.iter()
+                    .map(|s| format!("{}={} ({}r{})", s.key, s.value, s.roll_count,
+                        if s.inactive { " inactive" } else { "" }))
+                    .collect();
+                info!("[artifact] solver: total_rolls={} init={} [{}]",
+                    result.total_rolls, result.initial_substat_count, roll_str.join(", "));
+            }
+            (subs, unact, Some(result.total_rolls))
+        } else {
+            // Phase 4: Fall back to heuristic merge (pick best from each line)
+            if config.verbose {
+                warn!("[artifact] solver failed, using heuristic merge");
+            }
+            let mut subs = Vec::new();
+            let mut unact = Vec::new();
+            for i in 0..4 {
+                let (sub_x, sub_y, sub_w, sub_h) = ocr_regions.substat_lines[i];
+                let sub_rect = (sub_x, sub_y, sub_w, sub_h);
+
+                // OCR both engines with fallback
+                let ocr_with_fb = |engine: &dyn ImageToText<RgbImage>| -> String {
+                    let text = Self::ocr_image_region_shifted(engine, image, sub_rect, y_shift, scaler)
+                        .unwrap_or_default();
+                    if stat_parser::parse_stat_from_text(&text).is_some() { return text; }
+                    let masked = Self::ocr_image_region_shifted_masked(engine, image, sub_rect, y_shift, scaler)
+                        .unwrap_or_default();
+                    if stat_parser::parse_stat_from_text(&masked).is_some() { return masked; }
+                    let cn = |s: &str| s.chars().filter(|c| *c >= '\u{4E00}' && *c <= '\u{9FFF}').count();
+                    if cn(&masked) > cn(&text) { masked } else { text }
+                };
+                let text1 = ocr_with_fb(substat_ocr);
+                let text2 = ocr_with_fb(ocr);
+                let parsed1 = stat_parser::parse_stat_from_text(text1.trim());
+                let parsed2 = stat_parser::parse_stat_from_text(text2.trim());
+                let (line, merged) = Self::merge_dual_ocr_stats(text1.trim(), parsed1, text2.trim(), parsed2);
+                if line.len() < 2 { continue; }
+                if line.contains("2\u{4EF6}\u{5957}") { break; }
+                if let Some(parsed) = merged {
+                    let sub = GoodSubStat { key: parsed.key, value: parsed.value, initial_value: None };
+                    if parsed.inactive { unact.push(sub); } else { subs.push(sub); }
+                }
+            }
+            (subs, unact, None)
+        };
+
+        // Note: unactivated substats are now handled by the solver pipeline.
+        // The OCR candidates include inactive=true when "(待激活)" is detected,
+        // and the solver propagates this flag through to SolvedSubstat.inactive.
 
         // 6. Set name — try multiple Y positions since OCR may miss some substats.
         //    The set name line is below the substats, so its Y depends on how many
@@ -676,6 +957,7 @@ impl GoodArtifactScanner {
             astral_mark,
             elixir_crafted,
             unactivated_substats,
+            total_rolls,
         }))
     }
 
@@ -713,12 +995,12 @@ impl GoodArtifactScanner {
         info!("[artifact] starting scan...");
         let now = SystemTime::now();
 
-        // Focus the game window before doing anything
-        ctrl.focus_game_window();
-
-        // Press Escape to close any open menus before starting
-        ctrl.key_press(enigo::Key::Escape);
-        yas::utils::sleep(500);
+        if !skip_open_backpack {
+            // Return to main world using BGI-style strategy:
+            // press Escape one at a time, verify after each press.
+            ctrl.focus_game_window();
+            ctrl.return_to_main_ui(8);
+        }
 
         let mut bp = BackpackScanner::new(ctrl);
 
@@ -729,7 +1011,23 @@ impl GoodArtifactScanner {
 
         // Create a temporary OCR model just for reading item count
         let count_ocr = ocr_factory::create_ocr_model(&self.config.ocr_backend)?;
-        let (_, total_count) = bp.read_item_count(count_ocr.as_ref())?;
+        let (current_count, _max_capacity) = bp.read_item_count(count_ocr.as_ref())?;
+
+        // If count is 0, try reopening backpack (handles bad state after prior scan)
+        let total_count = if current_count == 0 {
+            warn!("[artifact] count=0, reopening backpack...");
+            drop(bp);
+            ctrl.return_to_main_ui(4);
+            let mut bp2 = BackpackScanner::new(ctrl);
+            bp2.open_backpack(self.config.open_delay);
+            bp2.select_tab("artifact", self.config.delay_tab);
+            let (count, _) = bp2.read_item_count(count_ocr.as_ref())?;
+            drop(bp2);
+            bp = BackpackScanner::new(ctrl);
+            count
+        } else {
+            current_count
+        };
 
         if total_count == 0 {
             warn!("[artifact] no artifacts in backpack");
@@ -740,7 +1038,7 @@ impl GoodArtifactScanner {
         // Clone scaler so callback doesn't conflict with BackpackScanner's borrow
         let scaler = bp.scaler().clone();
 
-        // Create OCR pool with multiple model instances for parallel OCR.
+        // Create OCR pools with multiple model instances for parallel OCR.
         // Use available parallelism (capped at 8) for pool size.
         let pool_size = std::thread::available_parallelism()
             .map(|n| n.get().min(8))
@@ -750,13 +1048,23 @@ impl GoodArtifactScanner {
             move || ocr_factory::create_ocr_model(&ocr_backend),
             pool_size,
         )?);
-        info!("[artifact] OCR pool: {} instances", pool_size);
+        // Separate OCR pool for substats — always create a separate pool even if
+        // same backend, because each task checks out from both pools simultaneously.
+        // Sharing a pool causes deadlock: N tasks each hold 1 instance, all waiting for a 2nd.
+        let substat_backend = self.config.substat_ocr_backend.clone();
+        let substat_ocr_pool = Arc::new(OcrPool::new(
+            move || ocr_factory::create_ocr_model(&substat_backend),
+            pool_size,
+        )?);
+        info!("[artifact] OCR pool: {} instances (main={}, substat={})",
+            pool_size, self.config.ocr_backend, self.config.substat_ocr_backend);
 
         // Shared context for worker threads
         let worker_mappings = self.mappings.clone();
         let worker_config = self.config.clone();
         let worker_scaler = scaler.clone();
         let worker_ocr_pool = ocr_pool.clone();
+        let worker_substat_ocr_pool = substat_ocr_pool.clone();
         let worker_ocr_regions = ArtifactOcrRegions::new();
 
         // Start the parallel worker.
@@ -773,16 +1081,19 @@ impl GoodArtifactScanner {
                     return Ok(None);
                 }
 
-                // Checkout an OCR model from the pool (blocks until available)
+                // Checkout OCR models from pools (blocks until available)
                 let ocr_guard = worker_ocr_pool.get();
+                let substat_ocr_guard = worker_substat_ocr_pool.get();
 
                 match Self::scan_single_artifact(
                     &ocr_guard,
+                    &substat_ocr_guard,
                     &work_item.image,
                     &worker_scaler,
                     &worker_ocr_regions,
                     &worker_mappings,
                     &worker_config,
+                    work_item.index,
                 )? {
                     ArtifactScanResult::Artifact(artifact) => {
                         if artifact.rarity >= worker_config.min_rarity {
@@ -801,6 +1112,7 @@ impl GoodArtifactScanner {
         let scan_config = BackpackScanConfig {
             delay_grid_item: self.config.delay_grid_item,
             delay_scroll: self.config.delay_scroll,
+            delay_after_panel: 100,
         };
 
         bp.scan_grid(
@@ -880,6 +1192,17 @@ impl GoodArtifactScanner {
         image: &RgbImage,
         scaler: &CoordScaler,
     ) -> DebugScanResult {
+        // Create substat OCR if different from main backend
+        let substat_ocr_model: Option<Box<dyn ImageToText<RgbImage> + Send>> =
+            if self.config.substat_ocr_backend != self.config.ocr_backend {
+                ocr_factory::create_ocr_model(&self.config.substat_ocr_backend).ok()
+            } else {
+                None
+            };
+        let substat_ocr: &dyn ImageToText<RgbImage> = match substat_ocr_model {
+            Some(ref m) => m.as_ref(),
+            None => ocr,
+        };
         use std::time::Instant;
 
         let total_start = Instant::now();
@@ -934,13 +1257,13 @@ impl GoodArtifactScanner {
 
         // Elixir detection
         let t = Instant::now();
-        let elixir_crafted = Self::detect_elixir_crafted(ocr, image, self.ocr_regions.elixir, scaler).unwrap_or(false);
+        let elixir_crafted = Self::detect_elixir_crafted(image, scaler);
         let y_shift = if elixir_crafted { ELIXIR_SHIFT } else { 0.0 };
         fields.push(DebugOcrField {
             field_name: "elixir".into(),
             raw_text: String::new(),
             parsed_value: format!("{}", elixir_crafted),
-            region: self.ocr_regions.elixir,
+            region: (1520.0, 423.0, 1.0, 1.0), // pixel check, not a region
             duration_ms: t.elapsed().as_millis() as u64,
         });
 
@@ -962,7 +1285,7 @@ impl GoodArtifactScanner {
             duration_ms: t.elapsed().as_millis() as u64,
         });
 
-        // Substats — read each line individually
+        // Substats — read each line individually (using substat OCR backend)
         let t = Instant::now();
         let mut substats: Vec<GoodSubStat> = Vec::new();
         let mut unactivated_substats: Vec<GoodSubStat> = Vec::new();
@@ -970,13 +1293,13 @@ impl GoodArtifactScanner {
         for i in 0..4 {
             let (sub_x, sub_y, sub_w, sub_h) = self.ocr_regions.substat_lines[i];
             let line_text = Self::ocr_image_region_shifted(
-                ocr, image, (sub_x, sub_y, sub_w, sub_h), y_shift, scaler,
+                substat_ocr, image, (sub_x, sub_y, sub_w, sub_h), y_shift, scaler,
             ).unwrap_or_default();
             let line = line_text.trim().to_string();
             if line.len() < 2 { subs_raw_lines.push(line); continue; }
             if line.contains("2\u{4EF6}\u{5957}") { break; }
             if let Some(parsed) = stat_parser::parse_stat_from_text(&line) {
-                let sub = GoodSubStat { key: parsed.key, value: parsed.value };
+                let sub = GoodSubStat { key: parsed.key, value: parsed.value, initial_value: None };
                 if parsed.inactive {
                     unactivated_substats.push(sub);
                 } else {
@@ -1058,6 +1381,7 @@ impl GoodArtifactScanner {
             astral_mark,
             elixir_crafted,
             unactivated_substats,
+            total_rolls: None,
         };
         let parsed_json = serde_json::to_string_pretty(&artifact).unwrap_or_default();
 
