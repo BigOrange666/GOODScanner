@@ -1,99 +1,125 @@
 <div align="center">
 
-# Yas
+# GOODScanner
 
-Yet Another Scanner
-又一个原神圣遗物导出器
+基于 [yas](https://github.com/1803233552/yas) 编写的原神 GOOD 格式扫描器
+
+扫描游戏内角色、武器、圣遗物数据，导出为 [GOOD v3](https://frzyc.github.io/genshin-optimizer/#/doc) 格式 JSON，可直接导入 [GGArtifact](https://ggartifact.com/)、[Genshin Optimizer](https://frzyc.github.io/genshin-optimizer/) 等配装工具。
+
+[![Build](https://github.com/Anyrainel/GOODScanner/actions/workflows/rust.yml/badge.svg)](https://github.com/Anyrainel/GOODScanner/actions)
+
+**[English](README_EN.md)**
 
 </div>
 
-## 介绍
+## 功能
 
-基于 SVTR（基本上是 MobileNetV3_Small + Transformer）字符识别模型，使用原神字体对原神中会出现的字符串进行训练，达到更高的速度和更精确的结果。相比 CRNN（旧版Yas使用的模型），SVTR 可以达到更小的体积及更好的识别率。导出结果可以导入分析工具（例如 [莫娜占卜铺](https://mona-uranai.com/) ）进行配装或者其他计算。由于使用了 [Rust](https://www.rust-lang.org/) 进行编写，运行效率和文件体积都得到了很大的提升。
+- **角色扫描**：名称、等级、突破、命座、天赋
+- **武器扫描**：名称、等级、突破、精炼、装备角色、锁定状态
+- **圣遗物扫描**：套装、位置、主词条、副词条（含精炼值验证）、等级、稀有度、锁定、星标、祝圣秘境标记、待激活词条
+- **双引擎 OCR**：PPOCRv4（通用）+ PPOCRv5（等级专用），自动选择最优结果
+- **副词条验证**：Roll Solver 基于游戏机制验证词条合法性
 
-### 相关资料
+## 快速开始
 
-- [MobileNetV3](https://arxiv.org/pdf/1905.02244.pdf)
-- [CRNN](https://arxiv.org/pdf/1507.05717.pdf)
-- [SVTR](https://arxiv.org/pdf/2205.00159.pdf)
-- [Transformer](https://proceedings.neurips.cc/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf)
+### 下载
 
-### 识别模型
+从 [Releases](https://github.com/Anyrainel/GOODScanner/releases) 页面下载最新的 `GOODScanner.exe`。
 
-SVTR 原文使用了多个 Local/Global Mixing，其中 Global Mixing 就是 Transformer 层，而根据*PaddleOCR*的代码，其 SVTR 识别模型也并未完全遵照 SVTR 原模型，而是骨干网络 + Transformer 的结构。*Yas*同样采用 PaddleOCR 的做法，使用 MobileNetV3_Small + Global Mixing，相当于将 CRNN 的 RNN 替换为 Transformer。由于训练集更加定制化，模型输入张量更小，网络结构简单，Yas模型相比PaddleOCR的V4轻量级模型，推理速度提升了6倍（仅在作者个人电脑上测试）。
+### 使用步骤
 
-## 使用
-`yas.exe`把不同游戏的功能都集成到了一个exe中，因此需要使用命令行指定游戏，例如：
+1. 以**管理员身份**运行 `GOODScanner.exe`
+2. 首次运行会提示输入自定义角色名（旅行者/流浪者等），配置保存在 `data/good_config.json`
+3. 确保原神已运行，按回车开始扫描（程序会自动切换到游戏窗口并打开对应界面）
+4. 扫描过程中可按**鼠标右键**终止
+5. 结果输出为当前目录下的 `GOODv3.json`
+
+### 扫描目标
+
+默认扫描全部（角色 + 武器 + 圣遗物）。也可以指定：
+
 ```shell
-yas.exe genshin
-```
-运行`yas.exe --help`查看所有指令，运行`yas.exe help genshin`查看游戏特定的指令。
-
-也可以下载特定游戏的版本，例如`yas_artifact.exe`只能用于扫描原神的圣遗物。
-
-### Windows
-
-- 打开原神/星铁，并切换到背包页面，将背包拉到最上面
-- 如果是`yas.exe`，需要用命令行运行`yas.exe genshin`，如果是`yas_artifact.exe`，直接运行即可
-- 扫描过程中，鼠标右键终止
-
-### Linux
-- 还没有经过详细测试
-- 首先请确保自己在 x11 下或者 GNOME/Wayland 下（其他 wayland de 下[会有很坏的性能](https://github.com/poly000/screenshots-rs/blob/d96dff76c5f5cbd849d80451f0df8f415f8e5f4b/src/linux/wayland_screenshot.rs#L109)）
-- 用 wine 窗口化运行原神（或者全屏+虚拟桌面），打开圣遗物界面，拉到最顶
-- 启动 yas
-- Alt+Tab 切换到原神窗口，并且在鼠标变为十字后点击一下（还没做窗口聚焦），注意保证原神窗口整体在屏幕内
-- 等待扫描结束。
-
-### 注意
-
-- 默认 4 星以下圣遗物不扫描
-- 不是所有窗口比例都支持，推荐 16:9 的分辨率（如 1600x900, 1920x1080, 3840x2160）
-- 扫描过程中不要对鼠标做任何操作
-- 当前仅支持中文环境，若默认系统为非中文，请前往游戏设置界面修改 Language 为“简体中文”，否则无法读取原神窗口
-- 当前仅支持键鼠作为控制设备，暂不支持手柄。
-
-### 命令行使用
-
-假设你知道如何使用命令行工具。
-
-
-查看选项：
-```shell
-yas --help
-yas help genshin
-yas help starrail
+GOODScanner.exe                    # 扫描全部
+GOODScanner.exe --characters       # 仅扫描角色
+GOODScanner.exe --weapons          # 仅扫描武器
+GOODScanner.exe --artifacts        # 仅扫描圣遗物
+GOODScanner.exe --characters --weapons  # 组合扫描
 ```
 
-只扫描五星圣遗物：
-```shell
-yas genshin --min-star=5
+## 注意事项
+
+- 需要**管理员权限**（用于模拟键鼠输入）
+- 仅支持**简体中文**游戏客户端
+- 推荐 **16:9** 分辨率（1920×1080、2560×1440 等）
+- 扫描过程中请勿操作鼠标
+- 默认 4 星以下圣遗物不扫描（可通过 `--artifact-min-rarity` 调整）
+
+## 命令行参数
+
+### 通用选项
+
+| 参数 | 说明 |
+|------|------|
+| `-v, --verbose` | 显示详细扫描信息 |
+| `--continue-on-failure` | 单项失败时继续扫描 |
+| `--log-progress` | 逐项显示扫描进度 |
+| `--output-dir <DIR>` | 输出目录（默认当前目录） |
+| `--ocr-backend <NAME>` | 覆盖 OCR 后端（ppocrv4 或 ppocrv5） |
+| `--dump-images` | 保存 OCR 区域截图到 `debug_images/` |
+
+### 扫描器配置
+
+| 参数 | 说明 |
+|------|------|
+| `--weapon-min-rarity <N>` | 最低武器稀有度（默认 3） |
+| `--artifact-min-rarity <N>` | 最低圣遗物稀有度（默认 4） |
+| `--char-max-count <N>` | 最大角色数（0 = 不限） |
+| `--weapon-max-count <N>` | 最大武器数（0 = 不限） |
+| `--artifact-max-count <N>` | 最大圣遗物数（0 = 不限） |
+| `--weapon-skip-delay` | 跳过武器面板等待（更快但锁定检测可能不准） |
+| `--artifact-skip-delay` | 跳过圣遗物面板等待（更快但锁定/星标检测可能不准） |
+| `--artifact-substat-ocr <NAME>` | 副词条 OCR 后端（默认 ppocrv4） |
+
+### 配置文件
+
+时序参数和角色名通过 `data/good_config.json` 配置，无需命令行参数：
+
+```json
+{
+  "traveler_name": "",
+  "wanderer_name": "",
+  "manekin_name": "",
+  "manekina_name": "",
+  "char_tab_delay": 400,
+  "char_open_delay": 1200,
+  "weapon_grid_delay": 60,
+  "weapon_scroll_delay": 200,
+  "artifact_grid_delay": 60,
+  "artifact_scroll_delay": 200
+}
 ```
 
-只扫描一行：
-```shell
-yas genshin --max-row=1
-```
-
-## 编译
-
-在构建前，请确保安装`Git LFS`，并运行`git lfs pull`。否则[yas 在运行时会使用错误的模型](https://github.com/wormtql/yas/pull/102#issuecomment-1375503803)。
+## 从源码构建
 
 ```shell
-# Linux 下需要首先安装 rustup 以及 mingw-w64 ，然后再安装对应的 rust target，
-# 构建到Linux需要 `libxdo` 和 `libxcb`
+# 需要 stable Rust 工具链
 rustup default stable
-rustup target add x86_64-pc-windows-gnu
-cargo build --release --locked --target=x86_64-pc-windows-gnu
+
+# 确保安装 Git LFS
+git lfs pull
+
+# 构建
+cargo build --release
+
+# 产物位于 target/release/GOODScanner.exe
 ```
 
-如果使用 macOS，为了保证正常捕捉窗口，需要在编译后运行 `codesign.sh` 对二进制文件进行签名
+## 致谢
 
-## 训练
-
-[yas-train](https://github.com/wormtql/yas-train)
+- [wormtql/yas](https://github.com/wormtql/yas) — 原始项目，提供核心 OCR 扫描框架
+- [1803233552/yas](https://github.com/1803233552/yas) — fork 版本，本项目基于此分支开发
+- [Andrewthe13th/Inventory_Kamera](https://github.com/Andrewthe13th/Inventory_Kamera) — GOOD 格式扫描器的参考实现
 
 ## 反馈
 
-- Issue
-- QQ 群：801106595
+- [GitHub Issues](https://github.com/Anyrainel/GOODScanner/issues)
