@@ -439,11 +439,6 @@ impl GoodScannerApplication {
         }
 
         // === Normal scan mode ===
-        let game_info = Self::get_game_info()?;
-
-        info!("window: {:?}", game_info.window);
-        info!("ui: {:?}", game_info.ui);
-        info!("cloud: {}", game_info.is_cloud);
 
         #[cfg(target_os = "windows")]
         {
@@ -458,7 +453,7 @@ impl GoodScannerApplication {
         let scan_weapons = config.scan_weapons || config.scan_all || no_flags;
         let scan_artifacts = config.scan_artifacts || config.scan_all || no_flags;
 
-        // Fetch and load mappings
+        // Fetch and load mappings (before game interaction — no focus steal)
         info!("=== 加载映射数据 / Loading mappings ===");
         let overrides = user_config.to_overrides();
         if let Some(ref n) = overrides.traveler_name { info!("旅行者 / Traveler: {}", n); }
@@ -473,17 +468,16 @@ impl GoodScannerApplication {
             mappings.artifact_set_map.len(),
         );
 
-        let mut ctrl = GenshinGameController::new(game_info)?;
-
-        // Pre-scan confirmation
+        // Pre-scan confirmation (BEFORE any game window interaction)
         {
-            let mut targets = Vec::new();
-            if scan_characters { targets.push("角色/Characters"); }
-            if scan_weapons { targets.push("武器/Weapons"); }
-            if scan_artifacts { targets.push("圣遗物/Artifacts"); }
+            let mut targets_zh = Vec::new();
+            let mut targets_en = Vec::new();
+            if scan_characters { targets_zh.push("角色"); targets_en.push("Characters"); }
+            if scan_weapons { targets_zh.push("武器"); targets_en.push("Weapons"); }
+            if scan_artifacts { targets_zh.push("圣遗物"); targets_en.push("Artifacts"); }
             println!();
-            println!("即将扫描: {}", targets.join(", "));
-            println!("Ready to scan: {}", targets.join(", "));
+            println!("即将扫描: {}", targets_zh.join(", "));
+            println!("Ready to scan: {}", targets_en.join(", "));
             println!();
             println!("请确认游戏已运行，按回车开始扫描。扫描过程中可按鼠标右键终止。");
             println!("Please confirm the game is running. Press Enter to start.");
@@ -491,6 +485,13 @@ impl GoodScannerApplication {
             let _ = std::io::stdin().read_line(&mut String::new());
         }
 
+        // NOW find and focus the game window (after user confirmation)
+        let game_info = Self::get_game_info()?;
+        info!("window: {:?}", game_info.window);
+        info!("ui: {:?}", game_info.ui);
+        info!("cloud: {}", game_info.is_cloud);
+
+        let mut ctrl = GenshinGameController::new(game_info)?;
         ctrl.focus_game_window();
 
         let mut characters = None;
