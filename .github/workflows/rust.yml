@@ -52,7 +52,9 @@ jobs:
               './genshin/Cargo.toml'
               './application/Cargo.toml'
           )
-          $ver = $env:VERSION.TrimStart('v')
+          # Cargo semver forbids leading zeros, so strip them (2026.03.12 -> 2026.3.12)
+          $parts = $env:VERSION.TrimStart('v').Split('.')
+          $ver = ($parts | ForEach-Object { [int]$_ }) -join '.'
           [regex]$pattern = '(?<=version = ").*(?=")'
           foreach ($file in $files) {
               $pattern.Replace((Get-Content -Raw $file), $ver, 1) | Out-File -FilePath $file

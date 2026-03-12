@@ -42,14 +42,14 @@ fn get_window(window_names: &[&str]) -> Result<(HWND, bool)> {
     }
 
     println!("找到多个符合名称的窗口，请手动选择窗口：");
-    for (i, (hwnd, title)) in viable_handles.iter().enumerate() {
+    for (i, (_hwnd, title)) in viable_handles.iter().enumerate() {
         println!("{}: {}", i, title);
     }
     let mut index = String::new();
-    stdin().read_line(&mut index);
+    let _ = stdin().read_line(&mut index);
 
     let idx = index.trim().parse::<usize>()?;
-    if idx >= 0 && idx < viable_handles.len() {
+    if idx < viable_handles.len() {
         let is_cloud = is_window_cloud(&viable_handles[idx].1);
         Ok((viable_handles[idx].0, is_cloud))
     } else {

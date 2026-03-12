@@ -46,6 +46,7 @@ struct SubStat {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct Character {
     key: String,
     level: i32,
@@ -62,6 +63,7 @@ struct Talent {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct Weapon {
     key: String,
     level: i32,
@@ -178,13 +180,6 @@ fn extract_number(text: &str) -> Option<i32> {
         }
     }
     nums.first().copied()
-}
-
-/// Check if OCR text contains the expected Chinese name (fuzzy: GT name substring match)
-fn text_contains_name(text: &str, _expected_key: &str) -> bool {
-    // We can't easily reverse GOOD key → Chinese name without the mappings.
-    // Instead return the raw text and let the caller compare.
-    !text.is_empty()
 }
 
 // ─── Artifact matching ──────────────────────────────────────────────────────

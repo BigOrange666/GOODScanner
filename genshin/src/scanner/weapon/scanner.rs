@@ -16,7 +16,6 @@ use crate::scanner::common::fuzzy_match::fuzzy_match_map;
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::{DebugOcrField, DebugScanResult, GoodWeapon};
-use crate::scanner::common::navigation;
 use crate::scanner::common::ocr_factory;
 use crate::scanner::common::ocr_pool::OcrPool;
 use crate::scanner::common::pixel_utils;

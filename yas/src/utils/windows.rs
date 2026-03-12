@@ -168,10 +168,11 @@ pub fn show_window_and_set_foreground(hwnd: HWND) {
     }
 }
 
+#[allow(static_mut_refs)]
 unsafe fn iterate_window_unsafe() -> Vec<HWND> {
     static mut ALL_HANDLES: Vec<HWND> = Vec::new();
 
-    extern "system" fn callback(hwnd: HWND, vec_ptr: LPARAM) -> BOOL {
+    extern "system" fn callback(hwnd: HWND, _vec_ptr: LPARAM) -> BOOL {
         unsafe {
             ALL_HANDLES.push(hwnd);
         }

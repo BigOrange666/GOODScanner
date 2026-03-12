@@ -6,8 +6,6 @@
 //! Optionally crops N pixels from the right side before OCR.
 
 use anyhow::Result;
-use image::RgbImage;
-use yas::ocr::ImageToText;
 use yas_genshin::scanner::common::ocr_factory::create_ocr_model;
 
 fn main() -> Result<()> {

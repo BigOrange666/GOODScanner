@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use image::RgbImage;
 use indicatif::{ProgressBar, ProgressStyle};
-use log::{error, warn};
+use log::error;
 
 /// A work item sent from the capture thread to the worker pool.
 pub struct WorkItem<M: Send> {

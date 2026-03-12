@@ -1,6 +1,6 @@
 use anyhow::Result;
 use image::RgbImage;
-use log::{error, info, warn};
+use log::{error, info};
 use regex::Regex;
 
 use yas::ocr::ImageToText;

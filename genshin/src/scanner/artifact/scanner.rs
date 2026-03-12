@@ -987,6 +987,7 @@ impl GoodArtifactScanner {
     }
 
     /// Generate a fingerprint for row-level deduplication.
+    #[allow(dead_code)]
     fn artifact_fingerprint(artifact: &GoodArtifact) -> String {
         let subs: Vec<String> = artifact
             .substats
@@ -1190,7 +1191,7 @@ impl GoodArtifactScanner {
         drop(item_tx);
 
         // Wait for all OCR work to complete and collect results
-        let mut artifacts = worker_handle.join();
+        let artifacts = worker_handle.join();
 
         // Note: previously filtered unleveled 4-star artifacts from 5-star-capable sets,
         // but this removed valid data (e.g., AubadeOfMorningstarAndMoon, ADayCarvedFromRisingWinds).

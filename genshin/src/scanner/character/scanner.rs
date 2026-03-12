@@ -18,7 +18,6 @@ use crate::scanner::common::fuzzy_match::fuzzy_match_map;
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::{DebugOcrField, DebugScanResult, GoodCharacter, GoodTalent};
-use crate::scanner::common::navigation;
 use crate::scanner::common::ocr_factory;
 use crate::scanner::common::ocr_pool::OcrPool;
 use crate::scanner::common::stat_parser::level_to_ascension;
@@ -382,6 +381,7 @@ impl GoodCharacterScanner {
 
     /// Debug: capture constellation page screenshot and sample pixel lightness.
     /// Saves full constellation page + logs lightness at each node position.
+    #[allow(dead_code)]
     fn debug_constellation_lightness(
         ctrl: &GenshinGameController,
         character_name: &str,
@@ -1125,6 +1125,7 @@ impl GoodCharacterScanner {
     /// Second pass: reopen character screen, navigate to each suspicious index,
     /// and rescan level + talents. Only updates the character if the new read
     /// is strictly better (higher level, or more non-1 talents).
+    #[allow(unused_assignments)]
     fn rescan_suspicious(
         &self,
         ctrl: &mut GenshinGameController,
@@ -1135,7 +1136,7 @@ impl GoodCharacterScanner {
         // Return to main world and reopen character screen
         ctrl.return_to_main_ui(4);
         let mut screen_opened = false;
-        for attempt in 0..3 {
+        for _attempt in 0..3 {
             ctrl.key_press(enigo::Key::Layout('c'));
             utils::sleep((self.config.open_delay as f64 * 1.5) as u32);
             let ocr = ocr_pool.get();
