@@ -9,10 +9,10 @@ Yas (Yet Another Scanner) is a Rust application that scans Genshin Impact in-gam
 ### Workspace Crates
 
 - **`yas`** (`yas_core`) — Platform-agnostic core library: screen capture, OCR (PaddlePaddle ONNX models), system control (mouse/keyboard), game window detection, positioning/scaling utilities.
-- **`yas-genshin`** (`yas_scanner_genshin`) — Genshin-specific scanner logic: GOOD v3 scanners for characters, weapons, and artifacts. Handles in-game navigation, panel OCR, and name matching via remote mappings.
-- **`yas-application`** — Binary crate. Single target: `yas.exe`.
+- **`genshin`** (`yas_scanner_genshin`) — Genshin-specific scanner logic: GOOD v3 scanners for characters, weapons, and artifacts. Handles in-game navigation, panel OCR, and name matching via remote mappings.
+- **`application`** — Binary crate. Single target: `GOODScanner.exe`.
 
-### Key Modules (yas-genshin)
+### Key Modules (genshin)
 
 ```
 src/

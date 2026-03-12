@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 yas = { path = "../yas" , package = "yas_core" }
-yas_genshin = { path = "../yas-genshin", package = "yas_scanner_genshin" }
+yas_genshin = { path = "../genshin", package = "yas_scanner_genshin" }
 clap = { version = "4.4", features = ["derive"] }
 log = "0.4"
 image = "0.24"

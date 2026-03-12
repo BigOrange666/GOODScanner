@@ -35,8 +35,8 @@ jobs:
           $files = @(
               './Cargo.toml'
               './yas/Cargo.toml'
-              './yas-genshin/Cargo.toml'
-              './yas-application/Cargo.toml'
+              './genshin/Cargo.toml'
+              './application/Cargo.toml'
           )
           [regex]$pattern = '(?<=version = ").*(?=")'
           foreach ($file in $files) {
