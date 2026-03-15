@@ -598,9 +598,9 @@ impl GoodScannerApplication {
             return Err(anyhow!("--debug-rescan-pos 格式应为 'row,col'（例如 '2,3'）\n--debug-rescan-pos must be 'row,col' (e.g., '2,3')"));
         }
         let row: usize = parts[0].trim().parse()
-            .map_err(|_| anyhow!("Invalid row in rescan pos"))?;
+            .map_err(|_| anyhow!("无效的行号 / Invalid row in rescan pos"))?;
         let col: usize = parts[1].trim().parse()
-            .map_err(|_| anyhow!("Invalid col in rescan pos"))?;
+            .map_err(|_| anyhow!("无效的列号 / Invalid col in rescan pos"))?;
 
         info!("=== Re-scan mode: type={} pos=({},{}) count={} ===",
             config.debug_rescan_type, row, col, config.debug_rescan_count);

@@ -36,7 +36,7 @@ pub fn quit() -> ! {
 
 #[doc(hidden)]
 pub fn error_and_quit_internal(args: Arguments) -> ! {
-    panic!("Error: {}", args);
+    panic!("错误 / Error: {}", args);
 }
 
 #[macro_export]

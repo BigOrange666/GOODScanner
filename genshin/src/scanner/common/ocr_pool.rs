@@ -28,7 +28,7 @@ impl OcrPool {
     {
         let (checkin, checkout) = crossbeam_channel::bounded(count);
         for _ in 0..count {
-            checkin.send(create_fn()?).map_err(|_| anyhow::anyhow!("pool channel closed"))?;
+            checkin.send(create_fn()?).map_err(|_| anyhow::anyhow!("OCR池通道已关闭 / Pool channel closed"))?;
         }
         Ok(Self { checkout, checkin })
     }
@@ -36,7 +36,7 @@ impl OcrPool {
     /// Checkout a model from the pool. Blocks until one is available.
     /// The model is returned to the pool when the guard is dropped.
     pub fn get(&self) -> OcrGuard {
-        let model = self.checkout.recv().expect("OCR pool channel closed");
+        let model = self.checkout.recv().expect("OCR池通道已关闭 / OCR pool channel closed");
         OcrGuard {
             model: Some(model),
             checkin: self.checkin.clone(),
@@ -54,7 +54,7 @@ impl ImageToText<RgbImage> for OcrGuard {
     fn image_to_text(&self, image: &RgbImage, is_preprocessed: bool) -> Result<String> {
         self.model
             .as_ref()
-            .expect("OcrGuard model already taken")
+            .expect("OCR模型已被取走 / OcrGuard model already taken")
             .image_to_text(image, is_preprocessed)
     }
 

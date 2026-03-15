@@ -171,7 +171,7 @@ impl GoodWeaponScanner {
                 warn!("[weapon] cannot match: \u{300C}{}\u{300D}, skipping", name_text);
                 return Ok(WeaponScanResult::Skip);
             }
-            bail!("Cannot match weapon: \u{300C}{}\u{300D}", name_text);
+            bail!("无法匹配武器 / Cannot match weapon: \u{300C}{}\u{300D}", name_text);
         }
 
         let weapon_key = weapon_key.unwrap();

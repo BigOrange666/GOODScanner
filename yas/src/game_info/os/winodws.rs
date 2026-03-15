@@ -38,10 +38,10 @@ fn get_window(window_names: &[&str]) -> Result<(HWND, bool)> {
     if viable_handles.len() == 1 {
         return Ok((viable_handles[0].0, is_window_cloud(&viable_handles[0].1)));
     } else if viable_handles.len() == 0 {
-        return Err(anyhow!("未找到游戏窗口，请确认{:?}已经开启", window_names));
+        return Err(anyhow!("未找到游戏窗口，请确认{:?}已经开启 / Game window not found, please make sure {:?} is running", window_names, window_names));
     }
 
-    println!("找到多个符合名称的窗口，请手动选择窗口：");
+    println!("找到多个符合名称的窗口，请手动选择窗口：/ Multiple matching windows found, please select one:");
     for (i, (_hwnd, title)) in viable_handles.iter().enumerate() {
         println!("{}: {}", i, title);
     }
@@ -53,7 +53,7 @@ fn get_window(window_names: &[&str]) -> Result<(HWND, bool)> {
         let is_cloud = is_window_cloud(&viable_handles[idx].1);
         Ok((viable_handles[idx].0, is_cloud))
     } else {
-        Err(anyhow!("索引{}超出范围", idx))
+        Err(anyhow!("索引{}超出范围 / Index {} out of range", idx, idx))
     }
 }
 
@@ -75,7 +75,7 @@ pub fn get_game_info(window_names: &[&str]) -> Result<GameInfo> {
     let rect = utils::get_client_rect(hwnd)?;
     let resolution_family = ResolutionFamily::new(rect.to_rect_usize().size());
     if resolution_family.is_none() {
-        return Err(anyhow!("Resolution not supported: {}x{}", rect.width, rect.height));
+        return Err(anyhow!("不支持的分辨率 / Resolution not supported: {}x{}", rect.width, rect.height));
     }
 
     Ok(GameInfo {

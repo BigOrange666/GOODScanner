@@ -5,6 +5,15 @@ fn init() {
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
         .init();
+
+    // Install a custom panic hook so that panics (from unwrap, expect, panic!, etc.)
+    // print the error and wait for user input before the process exits.
+    // Without this, the console window closes immediately and users can't see the error.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        press_any_key_to_continue();
+    }));
 }
 
 pub fn main() {
@@ -25,7 +34,7 @@ pub fn main() {
             press_any_key_to_continue();
         },
         Err(e) => {
-            log::error!("error: {}", e);
+            log::error!("错误 / Error: {}", e);
             press_any_key_to_continue();
         },
     }

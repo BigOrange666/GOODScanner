@@ -534,7 +534,7 @@ impl GoodArtifactScanner {
                     warn!("[artifact] cannot identify slot: \u{300C}{}\u{300D}, skipping", part_text);
                     return Ok(ArtifactScanResult::Skip);
                 }
-                bail!("Cannot identify artifact slot: \u{300C}{}\u{300D}", part_text);
+                bail!("无法识别圣遗物部位 / Cannot identify artifact slot: \u{300C}{}\u{300D}", part_text);
             }
         };
 
@@ -559,7 +559,7 @@ impl GoodArtifactScanner {
                     warn!("[artifact] cannot identify main stat: \u{300C}{}\u{300D}, skipping", main_stat_text);
                     return Ok(ArtifactScanResult::Skip);
                 }
-                bail!("Cannot identify main stat: \u{300C}{}\u{300D}", main_stat_text);
+                bail!("无法识别主词条 / Cannot identify main stat: \u{300C}{}\u{300D}", main_stat_text);
             }
         };
 
@@ -953,7 +953,7 @@ impl GoodArtifactScanner {
                     return Ok(ArtifactScanResult::Skip);
                 }
                 bail!(
-                    "Cannot identify artifact set (substats={}): \u{300C}{}\u{300D}",
+                    "无法识别圣遗物套装 / Cannot identify artifact set (substats={}): \u{300C}{}\u{300D}",
                     stat_count,
                     set_name_text
                 );

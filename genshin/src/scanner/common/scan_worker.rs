@@ -24,7 +24,7 @@ pub struct WorkerHandle<R> {
 impl<R> WorkerHandle<R> {
     /// Wait for the worker to finish and return ordered results.
     pub fn join(self) -> Vec<R> {
-        self.handle.join().expect("worker thread panicked")
+        self.handle.join().expect("工作线程崩溃 / Worker thread panicked")
     }
 
     /// Check if the worker has signaled that scanning should stop.

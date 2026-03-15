@@ -15,12 +15,12 @@ unsafe fn unsafe_capture(rect: Rect<i32>) -> Result<Vec<u8>> {
 
     let dc_mem: HDC = CreateCompatibleDC(dc_window);
     if dc_mem.is_null() {
-        return Err(anyhow!("CreateCompatibleDC failed"));
+        return Err(anyhow!("创建兼容DC失败 / CreateCompatibleDC failed"));
     }
 
     let hbm: HBITMAP = CreateCompatibleBitmap(dc_window, rect.width, rect.height);
     if hbm.is_null() {
-        return Err(anyhow!("CreateCompatibleBitmap failed"));
+        return Err(anyhow!("创建兼容位图失败 / CreateCompatibleBitmap failed"));
     }
 
     SelectObject(dc_mem, hbm as *mut c_void);
@@ -37,7 +37,7 @@ unsafe fn unsafe_capture(rect: Rect<i32>) -> Result<Vec<u8>> {
         SRCCOPY
     );
     if result == 0 {
-        return Err(anyhow!("BitBlt failed"));
+        return Err(anyhow!("屏幕截取失败 / BitBlt failed"));
     }
 
     let mut bitmap: BITMAP = BITMAP {

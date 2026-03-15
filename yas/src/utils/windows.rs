@@ -36,7 +36,7 @@ pub fn find_window_local(title: impl AsRef<str>) -> Result<HWND> {
     let class = encode_wide_with_null("UnityWndClass");
     let result: HWND = unsafe { FindWindowW(class.as_ptr(), title.as_ptr()) };
     if result.is_null() {
-        Err(anyhow!("cannot find window"))
+        Err(anyhow!("找不到游戏窗口 / Cannot find window"))
     } else {
         Ok(result)
     }
@@ -58,7 +58,7 @@ pub fn find_window_cloud() -> Result<HWND> {
             }
         }
     }
-    Err(anyhow!("cannot find window"))
+    Err(anyhow!("找不到游戏窗口 / Cannot find window"))
 }
 
 unsafe fn get_client_rect_unsafe(hwnd: HWND) -> Result<Rect<i32>> {

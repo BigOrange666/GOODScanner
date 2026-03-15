@@ -761,7 +761,7 @@ impl GoodCharacterScanner {
                     warn!("[character] cannot identify: \u{300C}{}\u{300D}, skipping", raw_text);
                     return Ok((None, false));
                 }
-                bail!("Cannot identify character: \u{300C}{}\u{300D}", raw_text);
+                bail!("无法识别角色 / Cannot identify character: \u{300C}{}\u{300D}", raw_text);
             }
         };
 

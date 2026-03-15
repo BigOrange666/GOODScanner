@@ -86,7 +86,7 @@ pub fn get_pid_and_ui() -> (i32, UI) {
         Ok(pid) => (pid, UI::Mobile),
         Err(_) => match pid_str_wine.trim().parse::<i32>() {
             Ok(pid) => (pid, UI::Desktop),
-            Err(_) => crate::error_and_quit!("No game program found"),
+            Err(_) => crate::error_and_quit!("未找到游戏进程 / No game program found"),
         },
     }
 }

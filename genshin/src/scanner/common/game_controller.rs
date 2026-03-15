@@ -265,7 +265,7 @@ impl GenshinGameController {
     /// Save the full game window as a PNG file.
     pub fn save_screenshot(&self, path: &str) -> Result<()> {
         let im = self.capture_game()?;
-        im.save(path).map_err(|e| anyhow!("Failed to save screenshot: {}", e))?;
+        im.save(path).map_err(|e| anyhow!("截图保存失败 / Failed to save screenshot: {}", e))?;
         debug!("[screenshot] saved full: {}", path);
         Ok(())
     }
@@ -281,7 +281,7 @@ impl GenshinGameController {
         base_h: f64,
     ) -> Result<()> {
         let im = self.capture_region(base_x, base_y, base_w, base_h)?;
-        im.save(path).map_err(|e| anyhow!("Failed to save screenshot: {}", e))?;
+        im.save(path).map_err(|e| anyhow!("截图保存失败 / Failed to save screenshot: {}", e))?;
         debug!("[screenshot] saved region ({},{},{},{}) -> {}", base_x, base_y, base_w, base_h, path);
         Ok(())
     }
