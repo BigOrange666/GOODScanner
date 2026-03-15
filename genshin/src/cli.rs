@@ -128,12 +128,10 @@ fn ensure_onnxruntime() -> Result<()> {
     }
 
     Err(anyhow!(
-        "所有下载源均失败 / All download sources failed. 最后一次错误 / Last error: {}\n\
-         您也可以手动下载 onnxruntime.dll 并放在程序同目录下。\n\
-         You can also manually download onnxruntime.dll and place it next to the exe.\n\
-         下载地址 / Download URL: {}",
+        "所有下载源均失败 / All download sources failed: {}\n\
+         手动下载地址 / Manual download: {}",
         last_error,
-        ORT_DOWNLOAD_URLS[0]
+        ORT_DOWNLOAD_URLS.last().unwrap()
     ))
 }
 
