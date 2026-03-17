@@ -986,6 +986,38 @@ impl GoodArtifactScanner {
         }))
     }
 
+    /// Identify a single artifact from a captured game screenshot (synchronous).
+    ///
+    /// This is a public wrapper around the internal `scan_single_artifact` for use
+    /// by the artifact manager module. It uses permissive settings (continue on
+    /// failure, no debug dumps) and returns `Ok(None)` for low-rarity or
+    /// unrecognizable artifacts instead of stopping/erroring.
+    ///
+    /// 从游戏截图中识别单个圣遗物（同步调用）。
+    /// 供圣遗物管理模块使用。
+    pub fn identify_artifact(
+        ocr: &dyn ImageToText<RgbImage>,
+        substat_ocr: &dyn ImageToText<RgbImage>,
+        image: &RgbImage,
+        scaler: &CoordScaler,
+        mappings: &MappingManager,
+    ) -> Result<Option<GoodArtifact>> {
+        let regions = ArtifactOcrRegions::new();
+        let config = GoodArtifactScannerConfig {
+            continue_on_failure: true,
+            dump_images: false,
+            verbose: false,
+            min_rarity: 1, // don't stop on low rarity, just return None
+            ..Default::default()
+        };
+
+        match Self::scan_single_artifact(ocr, substat_ocr, image, scaler, &regions, mappings, &config, 0) {
+            Ok(ArtifactScanResult::Artifact(a)) => Ok(Some(a)),
+            Ok(ArtifactScanResult::Stop) | Ok(ArtifactScanResult::Skip) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Generate a fingerprint for row-level deduplication.
     #[allow(dead_code)]
     fn artifact_fingerprint(artifact: &GoodArtifact) -> String {

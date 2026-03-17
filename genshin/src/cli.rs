@@ -428,6 +428,18 @@ pub struct GoodScannerConfig {
           default_value = "ppocrv4", help_heading = "扫描器配置 / Scanner Config")]
     pub artifact_substat_ocr: String,
 
+    // === Server mode ===
+
+    /// 启动管理服务器 / Start artifact manager server
+    #[arg(long = "server", help = "启动圣遗物管理HTTP服务器（而非扫描模式）\nStart artifact manager HTTP server instead of scanning",
+          help_heading = "服务器模式 / Server Mode")]
+    pub server_mode: bool,
+
+    /// 服务器端口 / Server port
+    #[arg(long = "port", help = "管理服务器监听端口\nArtifact manager server listen port",
+          default_value_t = 8765, help_heading = "服务器模式 / Server Mode")]
+    pub server_port: u16,
+
     // === Debug ===
 
     /// 真值对比 / Groundtruth comparison
@@ -567,6 +579,11 @@ impl GoodScannerApplication {
 
         // === Load user config (good_config.json) ===
         let user_config = load_or_create_config()?;
+
+        // === Server mode (artifact manager) ===
+        if config.server_mode {
+            return self.run_server_mode(&config, &user_config);
+        }
 
         // === Re-scan mode ===
         if config.debug_rescan_pos.is_some() {
@@ -865,6 +882,49 @@ impl GoodScannerApplication {
 
         info!("=== 重扫完成 / Re-scan complete ===");
         Ok(())
+    }
+
+    /// Server mode: start the artifact manager HTTP server.
+    fn run_server_mode(
+        &self,
+        config: &GoodScannerConfig,
+        user_config: &GoodUserConfig,
+    ) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            if !yas::utils::is_admin() {
+                return Err(anyhow!("请以管理员身份运行 / Please run as administrator"));
+            }
+        }
+
+        // Load mappings
+        info!("=== 加载映射数据 / Loading mappings ===");
+        let overrides = user_config.to_overrides();
+        let mappings = Arc::new(MappingManager::new(&overrides)?);
+        info!(
+            "已加载 / Loaded: {} characters, {} weapons, {} artifact sets",
+            mappings.character_name_map.len(),
+            mappings.weapon_name_map.len(),
+            mappings.artifact_set_map.len(),
+        );
+
+        // Find game window
+        let game_info = Self::get_game_info()?;
+        let mut ctrl = GenshinGameController::new(game_info)?;
+
+        // Create artifact manager
+        let ocr_backend = config.ocr_backend.clone().unwrap_or_else(|| "ppocrv5".to_string());
+        let substat_ocr_backend = config.artifact_substat_ocr.clone();
+        let mut manager = crate::manager::orchestrator::ArtifactManager::new(
+            mappings,
+            ocr_backend,
+            substat_ocr_backend,
+        );
+        manager.delay_grid_item = user_config.artifact_grid_delay;
+        manager.delay_scroll = user_config.artifact_scroll_delay;
+
+        // Start HTTP server (blocks forever)
+        crate::server::run_server(config.server_port, &mut ctrl, &manager)
     }
 
     /// Standalone diff mode: compare two existing JSON files without game.
