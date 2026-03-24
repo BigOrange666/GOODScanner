@@ -52,6 +52,9 @@ impl ArtifactManager {
     ) -> ManageResult {
         let mut all_results: Vec<InstructionResult> = Vec::new();
 
+        // Focus the game window before any UI interactions
+        ctrl.focus_game_window();
+
         // Partition instructions
         let has_lock_changes: Vec<&ArtifactInstruction> = request.instructions.iter()
             .filter(|i| i.changes.lock.is_some())

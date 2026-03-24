@@ -186,6 +186,9 @@ impl GenshinGameController {
     pub fn click_at(&mut self, base_x: f64, base_y: f64) {
         let x = self.game_info.window.left as f64 + self.scaler.scale_x(base_x);
         let y = self.game_info.window.top as f64 + self.scaler.scale_y(base_y);
+        log::debug!("[click_at] base=({:.0},{:.0}) -> screen=({},{}), window=({},{})",
+            base_x, base_y, x as i32, y as i32,
+            self.game_info.window.left, self.game_info.window.top);
         self.system_control.mouse_move_to(x as i32, y as i32).unwrap();
         utils::sleep(20);
         self.system_control.mouse_click().unwrap();

@@ -1018,6 +1018,12 @@ impl GoodArtifactScanner {
         }
     }
 
+    /// Public wrapper for `find_set_key_in_text` — used by the artifact manager
+    /// to match set names OCR'd from the selection view detail panel.
+    pub fn find_set_key_in_text_pub(text: &str, mappings: &MappingManager) -> Option<String> {
+        Self::find_set_key_in_text(text, mappings)
+    }
+
     /// Generate a fingerprint for row-level deduplication.
     #[allow(dead_code)]
     fn artifact_fingerprint(artifact: &GoodArtifact) -> String {

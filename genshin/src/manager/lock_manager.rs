@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use crate::scanner::artifact::GoodArtifactScanner;
 use crate::scanner::common::backpack_scanner::{BackpackScanConfig, BackpackScanner, GridEvent, ScanAction};
+use crate::scanner::common::constants::*;
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::GoodArtifact;
 use crate::scanner::common::ocr_factory;
+use crate::scanner::common::pixel_utils;
 
 use super::matching;
 use super::models::*;
@@ -18,13 +20,14 @@ use super::ui_actions;
 struct PendingToggle {
     instr_id: String,
     /// Grid index of the artifact in the backpack (for navigating back).
-    #[allow(dead_code)]
     grid_index: usize,
     /// Desired lock state after toggle.
-    #[allow(dead_code)]
     desired_lock: bool,
     y_shift: f64,
 }
+
+/// Panel pool rect for wait_until_panel_loaded (same as backpack_scanner).
+const PANEL_POOL_RECT: (f64, f64, f64, f64) = (1400.0, 300.0, 300.0, 200.0);
 
 /// Phase 1: Iterate the artifact backpack and toggle locks as needed.
 ///
@@ -218,31 +221,131 @@ impl LockManager {
         }
         // BackpackScanner dropped here — `ctrl` is free again
 
-        // ---- Pass 2: Toggle locks on matched artifacts ----
-        // For now, toggling requires clicking the lock button while the artifact
-        // panel is displayed. We need to navigate back to each matched grid position.
-        //
-        // TODO: When ui_actions::click_lock_button is implemented, this pass will:
-        // 1. Re-open backpack if needed
-        // 2. Navigate to each grid position (using scroll + click)
-        // 3. Click the lock button
-        // 4. Verify the toggle
-        //
-        // For now, all pending toggles get UiError since the placeholder will bail.
-        for toggle in &pending_toggles {
-            match ui_actions::click_lock_button(ctrl, toggle.y_shift) {
-                Ok(()) => {
+        // ---- Pass 2: Navigate back to matched artifacts and toggle locks ----
+        if !pending_toggles.is_empty() {
+            // Sort by grid_index for sequential forward scrolling
+            pending_toggles.sort_by_key(|t| t.grid_index);
+
+            info!(
+                "[lock_manager] Pass 2: {} 个锁定需要切换 / {} locks to toggle",
+                pending_toggles.len(),
+                pending_toggles.len()
+            );
+
+            // Close the backpack (still open from Pass 1 scan) then re-open
+            // to reset scroll position back to page 0.
+            ctrl.key_press(enigo::Key::Escape);
+            yas::utils::sleep(500);
+            {
+                let mut nav_scanner = BackpackScanner::new(ctrl);
+                nav_scanner.open_backpack(400);
+                nav_scanner.select_tab("artifact", 400);
+            }
+            // nav_scanner dropped, ctrl is free
+
+            let scaler = ctrl.scaler.clone();
+            let items_per_page = GRID_COLS * GRID_ROWS; // 40
+            let mut current_page: usize = 0;
+            let mut pages_scrolled: u32 = 0;
+
+            for toggle in &pending_toggles {
+                if yas::utils::is_rmb_down() {
+                    results.insert(toggle.instr_id.clone(), InstructionResult {
+                        id: toggle.instr_id.clone(),
+                        status: InstructionStatus::Aborted,
+                        detail: Some("用户中断 / User aborted".to_string()),
+                    });
+                    continue;
+                }
+
+                let target_page = toggle.grid_index / items_per_page;
+                let row_in_page = (toggle.grid_index % items_per_page) / GRID_COLS;
+                let col = toggle.grid_index % GRID_COLS;
+
+                // Scroll forward to the correct page
+                while current_page < target_page {
+                    // Move mouse to grid center for consistent scrolling
+                    ctrl.move_to(
+                        GRID_FIRST_X + 3.0 * GRID_OFFSET_X,
+                        GRID_FIRST_Y + 2.0 * GRID_OFFSET_Y,
+                    );
+                    yas::utils::sleep(30);
+
+                    let mut ticks = SCROLL_TICKS_PER_PAGE;
+                    pages_scrolled += 1;
+                    if SCROLL_CORRECTION_INTERVAL > 0
+                        && pages_scrolled % SCROLL_CORRECTION_INTERVAL as u32 == 0
+                    {
+                        ticks -= 1;
+                        debug!("[lock_manager] scroll correction at page {} (-1 tick)", pages_scrolled);
+                    }
+
+                    for i in 0..ticks {
+                        ctrl.mouse_scroll(1);
+                        if (i + 1) % 5 == 0 {
+                            yas::utils::sleep(10);
+                        }
+                    }
+                    yas::utils::sleep(200);
+                    current_page += 1;
+                }
+
+                // Click the grid position
+                let x = GRID_FIRST_X + col as f64 * GRID_OFFSET_X;
+                let y = GRID_FIRST_Y + row_in_page as f64 * GRID_OFFSET_Y;
+                ctrl.click_at(x, y);
+                let _ = ctrl.wait_until_panel_loaded(PANEL_POOL_RECT, 400);
+                yas::utils::sleep(100);
+
+                // Toggle lock
+                if let Err(e) = ui_actions::click_lock_button(ctrl, toggle.y_shift) {
+                    results.insert(toggle.instr_id.clone(), InstructionResult {
+                        id: toggle.instr_id.clone(),
+                        status: InstructionStatus::UiError,
+                        detail: Some(format!("锁定切换失败 / Lock toggle failed: {}", e)),
+                    });
+                    continue;
+                }
+
+                // Verify lock state changed
+                yas::utils::sleep(200);
+                let image = match ctrl.capture_game() {
+                    Ok(img) => img,
+                    Err(e) => {
+                        warn!("[lock_manager] 截图失败 / Capture failed: {}", e);
+                        results.insert(toggle.instr_id.clone(), InstructionResult {
+                            id: toggle.instr_id.clone(),
+                            status: InstructionStatus::UiError,
+                            detail: Some(format!("截图失败 / Capture failed: {}", e)),
+                        });
+                        continue;
+                    }
+                };
+                let new_lock = pixel_utils::detect_artifact_lock(&image, &scaler, toggle.y_shift);
+
+                if new_lock == toggle.desired_lock {
+                    info!(
+                        "[lock_manager] 锁定切换成功 #{} / Lock toggle success",
+                        toggle.grid_index
+                    );
                     results.insert(toggle.instr_id.clone(), InstructionResult {
                         id: toggle.instr_id.clone(),
                         status: InstructionStatus::Success,
                         detail: None,
                     });
-                }
-                Err(e) => {
+                } else {
+                    warn!(
+                        "[lock_manager] 锁定验证失败 #{}: 期望={} 实际={} / Lock verify failed",
+                        toggle.grid_index, toggle.desired_lock, new_lock
+                    );
                     results.insert(toggle.instr_id.clone(), InstructionResult {
                         id: toggle.instr_id.clone(),
                         status: InstructionStatus::UiError,
-                        detail: Some(format!("锁定切换失败 / Lock toggle failed: {}", e)),
+                        detail: Some(format!(
+                            "锁定切换验证失败（期望={}，实际={}）/ \
+                             Lock toggle verification failed (expected={}, actual={})",
+                            toggle.desired_lock, new_lock, toggle.desired_lock, new_lock
+                        )),
                     });
                 }
             }
