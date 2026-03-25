@@ -40,14 +40,14 @@ pub fn show(
                 ui,
                 l.t("武器", "Weapons"),
                 &mut state.scan_weapons,
-                Some((&mut state.weapon_min_rarity,)),
+                Some((&mut state.weapon_min_rarity, 3..=5)),
                 l,
             );
             scan_target_row(
                 ui,
                 l.t("圣遗物", "Artifacts"),
                 &mut state.scan_artifacts,
-                Some((&mut state.artifact_min_rarity,)),
+                Some((&mut state.artifact_min_rarity, 3..=5)),
                 l,
             );
         });
@@ -249,16 +249,16 @@ fn scan_target_row(
     ui: &mut egui::Ui,
     label: &str,
     checked: &mut bool,
-    rarity: Option<(&mut i32,)>,
+    rarity: Option<(&mut i32, std::ops::RangeInclusive<i32>)>,
     l: Lang,
 ) {
     ui.horizontal(|ui| {
         ui.checkbox(checked, label);
-        if let Some((rarity_val,)) = rarity {
+        if let Some((rarity_val, range)) = rarity {
             if *checked {
                 ui.add_space(16.0);
                 ui.label(l.t("最低★", "Min ★"));
-                ui.add(egui::Slider::new(rarity_val, 1..=5).show_value(true));
+                ui.add(egui::Slider::new(rarity_val, range).show_value(true));
             }
         }
     });
