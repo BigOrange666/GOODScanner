@@ -235,6 +235,10 @@ pub struct GoodUserConfig {
     pub artifact_tab_delay: u64,
     #[serde(default = "default_open_delay")]
     pub artifact_open_delay: u64,
+
+    /// GUI language preference: "zh" or "en".
+    #[serde(default)]
+    pub lang: String,
 }
 
 impl GoodUserConfig {
@@ -269,6 +273,7 @@ impl Default for GoodUserConfig {
             artifact_scroll_delay: default_scroll_delay(),
             artifact_tab_delay: default_tab_delay(),
             artifact_open_delay: default_open_delay(),
+            lang: String::new(),
         }
     }
 }

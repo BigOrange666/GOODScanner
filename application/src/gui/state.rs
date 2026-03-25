@@ -3,6 +3,34 @@ use std::sync::{Arc, Mutex};
 
 use yas_genshin::cli::{GoodUserConfig, ScanCoreConfig};
 
+/// UI language.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Lang {
+    Zh,
+    En,
+}
+
+impl Lang {
+    pub fn from_str(s: &str) -> Self {
+        if s == "en" { Lang::En } else { Lang::Zh }
+    }
+
+    pub fn to_str(self) -> &'static str {
+        match self {
+            Lang::Zh => "zh",
+            Lang::En => "en",
+        }
+    }
+
+    /// Pick the right string based on current language.
+    pub fn t<'a>(self, zh: &'a str, en: &'a str) -> &'a str {
+        match self {
+            Lang::Zh => zh,
+            Lang::En => en,
+        }
+    }
+}
+
 /// Status of a background operation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TaskStatus {
@@ -22,6 +50,9 @@ pub struct LogEntry {
 
 /// Shared state between GUI thread and background workers.
 pub struct AppState {
+    // --- Language ---
+    pub lang: Lang,
+
     // --- Scanner tab config ---
     pub user_config: GoodUserConfig,
     pub scan_characters: bool,
@@ -61,7 +92,9 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let user_config = yas_genshin::cli::load_config_or_default();
+        let lang = Lang::from_str(&user_config.lang);
         Self {
+            lang,
             user_config,
             scan_characters: true,
             scan_weapons: true,
@@ -85,6 +118,11 @@ impl AppState {
             manage_status: Arc::new(Mutex::new(TaskStatus::Idle)),
             log_lines: Arc::new(Mutex::new(Vec::with_capacity(1000))),
         }
+    }
+
+    /// Shorthand for language selection.
+    pub fn t<'a>(&self, zh: &'a str, en: &'a str) -> &'a str {
+        self.lang.t(zh, en)
     }
 
     /// Build a ScanCoreConfig from current UI state.

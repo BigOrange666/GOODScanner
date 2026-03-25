@@ -6,7 +6,7 @@ pub mod manager_tab;
 pub mod log_panel;
 
 use eframe::egui;
-use state::AppState;
+use state::{AppState, Lang};
 use worker::TaskHandle;
 
 /// Launch the GUI application.
@@ -63,19 +63,38 @@ impl GuiApp {
 
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Top bar with tabs
+        let l = self.state.lang;
+
+        // Top bar with tabs + language toggle
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(
                     &mut self.active_tab,
                     ActiveTab::Scanner,
-                    "扫描器 / Scanner",
+                    l.t("扫描器", "Scanner"),
                 );
                 ui.selectable_value(
                     &mut self.active_tab,
                     ActiveTab::Manager,
-                    "管理器 / Manager",
+                    l.t("管理器", "Manager"),
                 );
+
+                // Right-aligned language toggle
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = match l {
+                        Lang::Zh => "EN",
+                        Lang::En => "中",
+                    };
+                    if ui.small_button(label).clicked() {
+                        self.state.lang = match l {
+                            Lang::Zh => Lang::En,
+                            Lang::En => Lang::Zh,
+                        };
+                        // Persist
+                        self.state.user_config.lang = self.state.lang.to_str().to_string();
+                        let _ = yas_genshin::cli::save_config(&self.state.user_config);
+                    }
+                });
             });
         });
 
@@ -117,19 +136,7 @@ impl eframe::App for GuiApp {
         });
 
         // Request repaint while tasks are running (for status updates)
-        let any_running = self
-            .scan_handle
-            .as_ref()
-            .map_or(false, |h| !h.is_finished())
-            || self
-                .server_handle
-                .as_ref()
-                .map_or(false, |h| !h.is_finished())
-            || self
-                .manage_handle
-                .as_ref()
-                .map_or(false, |h| !h.is_finished());
-
+        let any_running = is_scan_running || is_server_running || is_manage_running;
         if any_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }

@@ -3,15 +3,17 @@ use eframe::egui;
 use super::state::AppState;
 
 pub fn show(ui: &mut egui::Ui, state: &AppState) {
+    let l = state.lang;
+
     ui.horizontal(|ui| {
-        ui.strong("日志 / Log");
+        ui.strong(l.t("日志", "Log"));
         let count = state.log_lines.lock().unwrap().len();
         if count > 0 {
             ui.colored_label(
                 egui::Color32::from_rgb(120, 120, 120),
                 format!("({})", count),
             );
-            if ui.small_button("清除 / Clear").clicked() {
+            if ui.small_button(l.t("清除", "Clear")).clicked() {
                 state.log_lines.lock().unwrap().clear();
             }
         }
@@ -19,7 +21,6 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) {
 
     ui.separator();
 
-    // Lock once, iterate without cloning
     let lines = state.log_lines.lock().unwrap();
 
     egui::ScrollArea::vertical()
@@ -35,7 +36,11 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) {
                     log::Level::Trace => egui::Color32::from_rgb(100, 100, 100),
                 };
                 let text = format!("{} {}", entry.timestamp, entry.message);
-                ui.label(egui::RichText::new(text).text_style(egui::TextStyle::Monospace).color(color));
+                ui.label(
+                    egui::RichText::new(text)
+                        .text_style(egui::TextStyle::Monospace)
+                        .color(color),
+                );
             }
         });
 }
