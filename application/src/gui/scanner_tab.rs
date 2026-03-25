@@ -37,12 +37,34 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, scan_handle: &mut Option<Ta
 
         ui.add_space(8.0);
 
-        // === Character Names (collapsed — set once, rarely changed) ===
-        egui::CollapsingHeader::new("角色名称 / Character Names")
-            .default_open(false)
-            .show(ui, |ui| {
+        // === Character Names ===
+        // Force open when names need attention (first-run, Start pressed with empty names)
+        let names_open = state.names_need_attention || !yas_genshin::cli::config_path().exists();
+        let header = egui::CollapsingHeader::new(
+            if state.names_need_attention {
+                egui::RichText::new("⚠ 角色名称 / Character Names").color(egui::Color32::from_rgb(255, 200, 50))
+            } else {
+                egui::RichText::new("角色名称 / Character Names")
+            },
+        )
+            .default_open(names_open)
+            .open(if state.names_need_attention { Some(true) } else { None });
+
+        header.show(ui, |ui| {
                 ui.add_enabled_ui(!is_scanning, |ui| {
-                    ui.label("自定义名字的角色，留空为默认 / Custom names for renameable characters (empty = default)");
+                    if state.names_need_attention {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 200, 50),
+                            "请输入您的游戏内角色名称，或留空使用默认名称，然后再次点击开始扫描。",
+                        );
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 200, 50),
+                            "Enter your in-game character names (or leave empty for defaults), then click Start Scan again.",
+                        );
+                        ui.add_space(4.0);
+                    } else {
+                        ui.label("自定义名字的角色，留空为默认 / Custom names for renameable characters (empty = default)");
+                    }
                     ui.add_space(2.0);
                     let w = (ui.available_width() - 140.0).max(120.0);
                     egui::Grid::new("names_grid")
@@ -54,6 +76,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, scan_handle: &mut Option<Ta
                             name_field(ui, "奇偶·男 / Manekin", &mut state.user_config.manekin_name, w);
                             name_field(ui, "奇偶·女 / Manekina", &mut state.user_config.manekina_name, w);
                         });
+
+                    // Clear the attention flag once the user interacts with a name field
+                    if state.names_need_attention {
+                        let any_filled = !state.user_config.traveler_name.trim().is_empty()
+                            || !state.user_config.wanderer_name.trim().is_empty()
+                            || !state.user_config.manekin_name.trim().is_empty()
+                            || !state.user_config.manekina_name.trim().is_empty();
+                        if any_filled {
+                            state.names_need_attention = false;
+                        }
+                    }
                 });
             });
 
@@ -144,8 +177,21 @@ fn action_bar(
                 )
                 .clicked()
             {
-                let _ = yas_genshin::cli::save_config(&state.user_config);
-                *scan_handle = Some(worker::spawn_scan(state));
+                // Check if character names have been configured
+                let all_empty = state.user_config.traveler_name.trim().is_empty()
+                    && state.user_config.wanderer_name.trim().is_empty()
+                    && state.user_config.manekin_name.trim().is_empty()
+                    && state.user_config.manekina_name.trim().is_empty();
+
+                if all_empty && !yas_genshin::cli::config_path().exists() {
+                    // First run: names never configured — force attention
+                    state.names_need_attention = true;
+                    log::warn!("请先配置角色名称 / Please configure character names before scanning");
+                } else {
+                    state.names_need_attention = false;
+                    let _ = yas_genshin::cli::save_config(&state.user_config);
+                    *scan_handle = Some(worker::spawn_scan(state));
+                }
             }
 
             if ui.button("💾 保存配置 / Save Config").clicked() {

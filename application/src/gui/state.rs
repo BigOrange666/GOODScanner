@@ -39,6 +39,10 @@ pub struct AppState {
     pub weapon_skip_delay: bool,
     pub artifact_skip_delay: bool,
 
+    /// Set to true when Start Scan is pressed but character names are all empty.
+    /// Forces the Character Names section open with a warning.
+    pub names_need_attention: bool,
+
     // --- Scanner task ---
     pub scan_status: Arc<Mutex<TaskStatus>>,
 
@@ -73,6 +77,7 @@ impl AppState {
             artifact_max_count: 0,
             weapon_skip_delay: false,
             artifact_skip_delay: false,
+            names_need_attention: false,
             scan_status: Arc::new(Mutex::new(TaskStatus::Idle)),
             server_port: 8765,
             server_enabled: Arc::new(AtomicBool::new(true)),
