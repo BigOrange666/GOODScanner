@@ -107,6 +107,8 @@ pub enum InstructionStatus {
     Aborted,
     /// Skipped because a prerequisite step failed.
     Skipped,
+    /// Input data is invalid (missing changes, empty keys, etc.).
+    InvalidInput,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,7 +138,7 @@ impl ManageSummary {
                 InstructionStatus::NotFound => summary.not_found += 1,
                 InstructionStatus::OcrError | InstructionStatus::UiError => summary.errors += 1,
                 InstructionStatus::Aborted => summary.aborted += 1,
-                InstructionStatus::Skipped => summary.errors += 1,
+                InstructionStatus::Skipped | InstructionStatus::InvalidInput => summary.errors += 1,
             }
         }
         summary

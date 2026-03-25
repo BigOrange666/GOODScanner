@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use log::info;
+use log::{info, warn};
 
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::MappingManager;
@@ -52,6 +52,38 @@ impl ArtifactManager {
     ) -> ManageResult {
         let mut all_results: Vec<InstructionResult> = Vec::new();
 
+        // Validate instructions before touching the game
+        let mut valid_instructions: Vec<ArtifactInstruction> = Vec::new();
+        for instr in &request.instructions {
+            if let Some(err) = validate_instruction(instr) {
+                warn!("[manager] 指令 {} 无效 / Instruction {} invalid: {}", instr.id, instr.id, err);
+                all_results.push(InstructionResult {
+                    id: instr.id.clone(),
+                    status: InstructionStatus::InvalidInput,
+                    detail: Some(err),
+                });
+            } else {
+                valid_instructions.push(instr.clone());
+            }
+        }
+
+        let invalid_count = all_results.len();
+        if invalid_count > 0 {
+            warn!(
+                "[manager] {} 条指令无效，已过滤 / {} invalid instructions filtered out",
+                invalid_count, invalid_count
+            );
+        }
+
+        if valid_instructions.is_empty() {
+            info!("[manager] 没有有效指令 / No valid instructions to execute");
+            let summary = ManageSummary::from_results(&all_results);
+            return ManageResult { results: all_results, summary };
+        }
+
+        // Replace request with validated instructions only
+        let request = ArtifactManageRequest { instructions: valid_instructions };
+
         // Focus the game window before any UI interactions
         ctrl.focus_game_window();
 
@@ -64,8 +96,8 @@ impl ArtifactManager {
             .collect();
 
         info!(
-            "[manager] 收到 {} 条指令：{} 条锁定变更，{} 条装备变更 / \
-             Received {} instructions: {} lock changes, {} equip changes",
+            "[manager] 执行 {} 条有效指令：{} 条锁定变更，{} 条装备变更 / \
+             Executing {} valid instructions: {} lock changes, {} equip changes",
             request.instructions.len(),
             has_lock_changes.len(),
             has_equip_changes.len(),
@@ -156,4 +188,51 @@ impl ArtifactManager {
             summary,
         }
     }
+}
+
+/// Validate a single instruction. Returns Some(error_message) if invalid.
+fn validate_instruction(instr: &ArtifactInstruction) -> Option<String> {
+    // Must have at least one change
+    if instr.changes.lock.is_none() && instr.changes.location.is_none() {
+        return Some(
+            "没有指定任何更改（lock 和 location 均为空） / \
+             No changes specified (both lock and location are null)"
+                .to_string(),
+        );
+    }
+
+    // Target fields must be non-empty
+    if instr.target.set_key.trim().is_empty() {
+        return Some(
+            "setKey 为空 / setKey is empty".to_string(),
+        );
+    }
+    if instr.target.slot_key.trim().is_empty() {
+        return Some(
+            "slotKey 为空 / slotKey is empty".to_string(),
+        );
+    }
+    if instr.target.main_stat_key.trim().is_empty() {
+        return Some(
+            "mainStatKey 为空 / mainStatKey is empty".to_string(),
+        );
+    }
+
+    // Rarity must be valid
+    if instr.target.rarity < 1 || instr.target.rarity > 5 {
+        return Some(format!(
+            "稀有度无效: {} (应为 1-5) / Invalid rarity: {} (must be 1-5)",
+            instr.target.rarity, instr.target.rarity
+        ));
+    }
+
+    // Level must be valid
+    if instr.target.level < 0 || instr.target.level > 20 {
+        return Some(format!(
+            "等级无效: {} (应为 0-20) / Invalid level: {} (must be 0-20)",
+            instr.target.level, instr.target.level
+        ));
+    }
+
+    None
 }
