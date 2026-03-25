@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use super::state::{AppState, Lang, TaskStatus};
+use super::state::{AppState, TaskStatus};
 use super::worker::{self, TaskHandle};
 
 pub fn show(
@@ -35,21 +35,9 @@ pub fn show(
         ui.strong(l.t("扫描目标", "Scan Targets"));
         ui.add_space(2.0);
         ui.add_enabled_ui(!is_scanning, |ui| {
-            scan_target_row(ui, l.t("角色", "Characters"), &mut state.scan_characters, None, l);
-            scan_target_row(
-                ui,
-                l.t("武器", "Weapons"),
-                &mut state.scan_weapons,
-                Some((&mut state.weapon_min_rarity, 3..=5)),
-                l,
-            );
-            scan_target_row(
-                ui,
-                l.t("圣遗物", "Artifacts"),
-                &mut state.scan_artifacts,
-                Some((&mut state.artifact_min_rarity, 3..=5)),
-                l,
-            );
+            ui.checkbox(&mut state.scan_characters, l.t("角色", "Characters"));
+            ui.checkbox(&mut state.scan_weapons, l.t("武器", "Weapons"));
+            ui.checkbox(&mut state.scan_artifacts, l.t("圣遗物", "Artifacts"));
         });
 
         ui.add_space(8.0);
@@ -243,25 +231,6 @@ fn action_bar(
         }
         _ => {}
     }
-}
-
-fn scan_target_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    checked: &mut bool,
-    rarity: Option<(&mut i32, std::ops::RangeInclusive<i32>)>,
-    l: Lang,
-) {
-    ui.horizontal(|ui| {
-        ui.checkbox(checked, label);
-        if let Some((rarity_val, range)) = rarity {
-            if *checked {
-                ui.add_space(16.0);
-                ui.label(l.t("最低★", "Min ★"));
-                ui.add(egui::Slider::new(rarity_val, range).show_value(true));
-            }
-        }
-    });
 }
 
 fn name_field(ui: &mut egui::Ui, label: &str, value: &mut String, width: f32) {
