@@ -3,12 +3,23 @@ use eframe::egui;
 use super::state::{AppState, TaskStatus};
 use super::worker::{self, TaskHandle};
 
-pub fn show(ui: &mut egui::Ui, state: &mut AppState, scan_handle: &mut Option<TaskHandle>) {
+pub fn show(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    scan_handle: &mut Option<TaskHandle>,
+    game_busy: bool, // true if server or manage task is running
+) {
     let is_scanning = scan_handle.as_ref().map_or(false, |h| !h.is_finished());
 
     // === Action bar (always visible at top) ===
     ui.add_space(4.0);
-    action_bar(ui, state, scan_handle, is_scanning);
+    action_bar(ui, state, scan_handle, is_scanning, game_busy);
+    if !is_scanning {
+        ui.colored_label(
+            egui::Color32::from_rgb(120, 120, 120),
+            "请确认游戏已运行，扫描过程中可按鼠标右键终止。/ Make sure the game is running. Right-click to abort.",
+        );
+    }
     ui.add_space(4.0);
     ui.separator();
 
@@ -156,7 +167,16 @@ fn action_bar(
     state: &mut AppState,
     scan_handle: &mut Option<TaskHandle>,
     is_scanning: bool,
+    game_busy: bool,
 ) {
+    // Warning if game controller is in use by another task
+    if game_busy && !is_scanning {
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 200, 50),
+            "管理器正在运行，请先停止后再扫描 / Manager is running. Stop it before scanning.",
+        );
+    }
+
     ui.horizontal(|ui| {
         if is_scanning {
             if ui.button("⏹ 停止扫描 / Stop Scan").clicked() {
@@ -170,24 +190,29 @@ fn action_bar(
         } else {
             let any_selected =
                 state.scan_characters || state.scan_weapons || state.scan_artifacts;
+            let can_scan = any_selected && !game_busy;
             if ui
                 .add_enabled(
-                    any_selected,
+                    can_scan,
                     egui::Button::new("▶ 开始扫描 / Start Scan"),
                 )
                 .clicked()
             {
-                // Check if character names have been configured
                 let all_empty = state.user_config.traveler_name.trim().is_empty()
                     && state.user_config.wanderer_name.trim().is_empty()
                     && state.user_config.manekin_name.trim().is_empty()
                     && state.user_config.manekina_name.trim().is_empty();
+                let first_run = !yas_genshin::cli::config_path().exists();
 
-                if all_empty && !yas_genshin::cli::config_path().exists() {
-                    // First run: names never configured — force attention
+                if all_empty && first_run && !state.names_need_attention {
+                    // First click on first run with empty names — show warning
                     state.names_need_attention = true;
-                    log::warn!("请先配置角色名称 / Please configure character names before scanning");
+                    log::warn!(
+                        "请先确认角色名称配置 / Please review character name settings before scanning"
+                    );
                 } else {
+                    // Either names are filled, or config exists, or user already
+                    // saw the warning and clicked Start again (acknowledging defaults)
                     state.names_need_attention = false;
                     let _ = yas_genshin::cli::save_config(&state.user_config);
                     *scan_handle = Some(worker::spawn_scan(state));

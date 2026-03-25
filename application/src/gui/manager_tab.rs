@@ -10,6 +10,7 @@ pub fn show(
     state: &mut AppState,
     server_handle: &mut Option<TaskHandle>,
     manage_handle: &mut Option<TaskHandle>,
+    scan_running: bool, // true if scanner is active
 ) {
     let is_server_running = server_handle.as_ref().map_or(false, |h| !h.is_finished());
     let is_managing = manage_handle.as_ref().map_or(false, |h| !h.is_finished());
@@ -17,6 +18,13 @@ pub fn show(
     ui.add_space(4.0);
     ui.label("接收来自网页前端的圣遗物管理指令（装备/锁定/解锁）");
     ui.label("Accept artifact manage instructions (equip/lock/unlock) from a web frontend.");
+    if scan_running {
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 200, 50),
+            "扫描正在进行，请等待完成 / Scan is running. Please wait for it to finish.",
+        );
+    }
     ui.add_space(8.0);
 
     // === HTTP Server Section ===
@@ -34,7 +42,9 @@ pub fn show(
 
             ui.add_space(12.0);
 
-            if is_server_running {
+            if scan_running && !is_server_running {
+                ui.add_enabled(false, egui::Button::new("▶ 启动 / Start"));
+            } else if is_server_running {
                 ui.spinner();
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 200, 100),
@@ -105,7 +115,7 @@ pub fn show(
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
-            let can_execute = !is_managing && !is_server_running;
+            let can_execute = !is_managing && !is_server_running && !scan_running;
             if ui
                 .add_enabled(can_execute, egui::Button::new("📁 选择文件 / Choose File..."))
                 .clicked()

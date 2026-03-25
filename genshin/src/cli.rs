@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -274,60 +273,34 @@ impl Default for GoodUserConfig {
     }
 }
 
-/// Read a single line from stdin, trimming whitespace.
-fn prompt_input(label: &str) -> String {
-    print!("{}", label);
-    let _ = std::io::stdout().flush();
-    let mut buf = String::new();
-    let _ = std::io::stdin().read_line(&mut buf);
-    buf.trim().to_string()
-}
-
-/// Run interactive first-run prompts and return a populated config.
-fn prompt_first_run_config() -> GoodUserConfig {
-    println!();
-    println!("=======================================================");
-    println!("  首次运行配置 / First-run Configuration");
-    println!("=======================================================");
-    println!();
-    println!("以下角色可以在游戏内自定义名字，请输入您的游戏内名字。");
-    println!("The following characters have customizable in-game names.");
-    println!("Please enter your in-game names for them.");
-    println!("留空表示使用默认名字。/ Leave empty for default names.");
-    println!();
-
-    let traveler_name = prompt_input("旅行者 / Traveler: ");
-    let wanderer_name = prompt_input("流浪者 / Wanderer: ");
-    let manekin_name = prompt_input("奇偶·男性 / Manekin: ");
-    let manekina_name = prompt_input("奇偶·女性 / Manekina: ");
-
-    println!();
-    println!("请确认游戏已运行，按回车开始扫描。扫描过程中可按鼠标右键终止。");
-    println!("Please confirm the game is running. Press Enter to start.");
-    println!("You can right-click to abort during scanning.");
-    let _ = std::io::stdin().read_line(&mut String::new());
-
-    GoodUserConfig {
-        traveler_name,
-        wanderer_name,
-        manekin_name,
-        manekina_name,
-        ..Default::default()
-    }
-}
-
 /// Load the user config from data/good_config.json without interactive prompts.
-/// Returns defaults if the file does not exist.
+/// Returns defaults if the file does not exist or cannot be parsed.
 pub fn load_config_or_default() -> GoodUserConfig {
     let path = config_path();
-    if path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            if let Ok(config) = serde_json::from_str(&contents) {
-                return config;
+    if !path.exists() {
+        return GoodUserConfig::default();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => match serde_json::from_str(&contents) {
+            Ok(config) => config,
+            Err(e) => {
+                log::error!(
+                    "配置文件解析失败，将使用默认值 / Config parse error (using defaults): {}: {}",
+                    path.display(),
+                    e
+                );
+                GoodUserConfig::default()
             }
+        },
+        Err(e) => {
+            log::error!(
+                "配置文件读取失败，将使用默认值 / Config read error (using defaults): {}: {}",
+                path.display(),
+                e
+            );
+            GoodUserConfig::default()
         }
     }
-    GoodUserConfig::default()
 }
 
 /// Save the user config to data/good_config.json.
@@ -342,21 +315,20 @@ pub fn save_config(config: &GoodUserConfig) -> Result<()> {
 }
 
 /// Load the user config from data/good_config.json (next to the executable).
-/// If the file does not exist, interactively prompt the user and save.
+/// If the file does not exist, return an error instructing the user to create it
+/// (via the GUI, or manually).
 fn load_or_create_config() -> Result<GoodUserConfig> {
-    let path = exe_dir().join(CONFIG_FILE_REL);
-    println!("正在查找配置文件... / Looking for config at: {}", path.display());
+    let path = config_path();
+    info!("正在查找配置文件... / Looking for config at: {}", path.display());
 
     if !path.exists() {
-        let config = prompt_first_run_config();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(&config)?;
-        std::fs::write(&path, &json)?;
-        println!("配置已保存 / Config saved to: {}", path.display());
-        debug!("Created config at: {}", path.display());
-        return Ok(config);
+        return Err(anyhow!(
+            "配置文件不存在 / Config file not found: {}\n\
+             请先运行 GUI（不带参数启动）创建配置文件，或手动创建。\n\
+             Please run the GUI first (launch without arguments) to create the config file,\n\
+             or create it manually at the path above.",
+            path.display()
+        ));
     }
 
     let contents = std::fs::read_to_string(&path)?;

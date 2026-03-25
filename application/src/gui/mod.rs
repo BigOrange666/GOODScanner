@@ -88,11 +88,21 @@ impl eframe::App for GuiApp {
                 log_panel::show(ui, &self.state);
             });
 
+        // Check cross-tab running states for mutual exclusion
+        let is_scan_running = self.scan_handle.as_ref().map_or(false, |h| !h.is_finished());
+        let is_server_running = self.server_handle.as_ref().map_or(false, |h| !h.is_finished());
+        let is_manage_running = self.manage_handle.as_ref().map_or(false, |h| !h.is_finished());
+
         // Central panel: active tab content
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.active_tab {
                 ActiveTab::Scanner => {
-                    scanner_tab::show(ui, &mut self.state, &mut self.scan_handle);
+                    scanner_tab::show(
+                        ui,
+                        &mut self.state,
+                        &mut self.scan_handle,
+                        is_server_running || is_manage_running,
+                    );
                 }
                 ActiveTab::Manager => {
                     manager_tab::show(
@@ -100,6 +110,7 @@ impl eframe::App for GuiApp {
                         &mut self.state,
                         &mut self.server_handle,
                         &mut self.manage_handle,
+                        is_scan_running,
                     );
                 }
             }
