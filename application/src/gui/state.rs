@@ -49,10 +49,33 @@ pub struct LogEntry {
     pub timestamp: String,
 }
 
+/// State of the auto-update check.
+#[derive(Clone, Debug)]
+pub enum UpdateState {
+    /// Background check in progress.
+    Checking,
+    /// A newer version is available.
+    Available {
+        latest_version: String,
+        download_url: String,
+    },
+    /// Download is in progress.
+    Downloading,
+    /// Update downloaded and applied — restart needed.
+    Ready,
+    /// Already on the latest version (or dev build).
+    None,
+    /// Check or download failed (non-fatal).
+    Failed(String),
+}
+
 /// Shared state between GUI thread and background workers.
 pub struct AppState {
     // --- Language ---
     pub lang: Lang,
+
+    // --- Auto-update ---
+    pub update_state: Arc<Mutex<UpdateState>>,
 
     // --- Scanner tab config ---
     pub user_config: GoodUserConfig,
@@ -101,6 +124,7 @@ impl AppState {
         Self {
             lang,
             user_config,
+            update_state: Arc::new(Mutex::new(UpdateState::Checking)),
             scan_characters: true,
             scan_weapons: true,
             scan_artifacts: true,

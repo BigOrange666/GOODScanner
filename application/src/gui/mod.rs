@@ -6,16 +6,45 @@ pub mod manager_tab;
 pub mod log_panel;
 
 use eframe::egui;
-use state::{AppState, Lang};
+use state::{AppState, Lang, UpdateState};
 use worker::TaskHandle;
 
 /// Launch the GUI application.
 pub fn run_gui() {
+    // Clean up leftover .old exe from a previous update
+    yas_genshin::updater::cleanup_old_exe();
+
     let state = AppState::new();
 
     // Init GUI logger (replaces env_logger in GUI mode)
     let logger = log_bridge::GuiLogger::new(state.log_lines.clone(), 2000);
     logger.init();
+
+    // Kick off background update check
+    {
+        let update_state = state.update_state.clone();
+        std::thread::spawn(move || {
+            match yas_genshin::updater::check_for_update() {
+                Ok(yas_genshin::updater::UpdateStatus::UpdateAvailable {
+                    latest_version,
+                    download_url,
+                    ..
+                }) => {
+                    *update_state.lock().unwrap() = UpdateState::Available {
+                        latest_version,
+                        download_url,
+                    };
+                }
+                Ok(_) => {
+                    *update_state.lock().unwrap() = UpdateState::None;
+                }
+                Err(e) => {
+                    log::debug!("更新检查失败 / Update check failed: {}", e);
+                    *update_state.lock().unwrap() = UpdateState::None;
+                }
+            }
+        });
+    }
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon_64.png"))
         .expect("Failed to load window icon");
@@ -103,6 +132,9 @@ impl eframe::App for GuiApp {
             });
         });
 
+        // Update banner (between tabs and content)
+        show_update_banner(ctx, &self.state);
+
         // Bottom panel: shared log area
         egui::TopBottomPanel::bottom("logs")
             .min_height(120.0)
@@ -140,12 +172,100 @@ impl eframe::App for GuiApp {
             }
         });
 
-        // Request repaint while tasks are running (for status updates)
-        let any_running = is_scan_running || is_server_running || is_manage_running;
+        // Request repaint while tasks or update check are in progress
+        let update_busy = matches!(
+            *self.state.update_state.lock().unwrap(),
+            UpdateState::Checking | UpdateState::Downloading,
+        );
+        let any_running =
+            is_scan_running || is_server_running || is_manage_running || update_busy;
         if any_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
+}
+
+/// Show the update notification banner when an update is available.
+fn show_update_banner(ctx: &egui::Context, state: &AppState) {
+    let l = state.lang;
+    let update_state = state.update_state.lock().unwrap().clone();
+
+    let show = !matches!(update_state, UpdateState::None | UpdateState::Checking);
+    if !show {
+        return;
+    }
+
+    egui::TopBottomPanel::top("update_banner").show(ctx, |ui| {
+        match update_state {
+            UpdateState::Available {
+                ref latest_version,
+                ref download_url,
+            } => {
+                ui.horizontal(|ui| {
+                    let current = yas_genshin::updater::current_version_display();
+                    ui.label(
+                        egui::RichText::new(l.t(
+                            &format!("发现新版本: {} → {}", current, latest_version),
+                            &format!("Update available: {} → {}", current, latest_version),
+                        ))
+                        .color(egui::Color32::from_rgb(255, 200, 50)),
+                    );
+                    if ui.button(l.t("下载更新", "Download Update")).clicked() {
+                        let update_state_arc = state.update_state.clone();
+                        let url = download_url.clone();
+                        *state.update_state.lock().unwrap() = UpdateState::Downloading;
+                        std::thread::spawn(move || {
+                            match yas_genshin::updater::download_and_replace(&url) {
+                                Ok(_) => {
+                                    *update_state_arc.lock().unwrap() = UpdateState::Ready;
+                                }
+                                Err(e) => {
+                                    *update_state_arc.lock().unwrap() =
+                                        UpdateState::Failed(format!("{}", e));
+                                }
+                            }
+                        });
+                    }
+                    if ui.button(l.t("跳过", "Skip")).clicked() {
+                        *state.update_state.lock().unwrap() = UpdateState::None;
+                    }
+                });
+            }
+            UpdateState::Downloading => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(l.t("正在下载更新...", "Downloading update..."));
+                });
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            UpdateState::Ready => {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(l.t(
+                            "更新已就绪，请重启程序。",
+                            "Update ready. Please restart the application.",
+                        ))
+                        .color(egui::Color32::from_rgb(100, 255, 100)),
+                    );
+                });
+            }
+            UpdateState::Failed(ref msg) => {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(l.t(
+                            &format!("更新失败: {}", msg),
+                            &format!("Update failed: {}", msg),
+                        ))
+                        .color(egui::Color32::from_rgb(255, 100, 100)),
+                    );
+                    if ui.button(l.t("关闭", "Dismiss")).clicked() {
+                        *state.update_state.lock().unwrap() = UpdateState::None;
+                    }
+                });
+            }
+            _ => {}
+        }
+    });
 }
 
 /// Load system CJK font for Chinese text rendering.

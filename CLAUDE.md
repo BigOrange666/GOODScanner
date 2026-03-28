@@ -17,6 +17,7 @@ Yas (Yet Another Scanner) is a Rust application that scans Genshin Impact in-gam
 ```
 src/
 ├── cli.rs                     # CLI entry point, orchestrates all scanning
+├── updater.rs                 # Auto-update: GitHub release check + self-replace
 ├── scanner/
 │   ├── common/                # Shared scanner infrastructure
 │   │   ├── game_controller.rs # Mouse/keyboard/capture control
