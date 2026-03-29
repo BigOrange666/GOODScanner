@@ -1035,59 +1035,58 @@ fn print_debug_result(result: &DebugScanResult) {
     println!("{}", result.parsed_json);
 }
 
-/// Generate a timestamp string like "2024-01-15_12-30-45"
+/// Generate a local-time timestamp string like "2024-01-15_12-30-45".
+#[cfg(target_os = "windows")]
+fn chrono_timestamp() -> String {
+    #[repr(C)]
+    struct SystemTime {
+        year: u16, month: u16, _dow: u16, day: u16,
+        hour: u16, minute: u16, second: u16, _ms: u16,
+    }
+    extern "system" {
+        fn GetLocalTime(lpSystemTime: *mut SystemTime);
+    }
+    let mut st = SystemTime { year: 0, month: 0, _dow: 0, day: 0, hour: 0, minute: 0, second: 0, _ms: 0 };
+    unsafe { GetLocalTime(&mut st) };
+    format!(
+        "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
+        st.year, st.month, st.day, st.hour, st.minute, st.second
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
 fn chrono_timestamp() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-
     let secs_per_day = 86400u64;
-    let secs_per_hour = 3600u64;
-    let secs_per_min = 60u64;
-
     let days = now / secs_per_day;
     let remaining = now % secs_per_day;
-    let hours = remaining / secs_per_hour;
-    let remaining = remaining % secs_per_hour;
-    let minutes = remaining / secs_per_min;
-    let seconds = remaining % secs_per_min;
-
+    let hours = remaining / 3600;
+    let minutes = (remaining % 3600) / 60;
+    let seconds = remaining % 60;
     let mut y = 1970i32;
     let mut d = days as i32;
-
     loop {
-        let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if d < days_in_year {
-            break;
-        }
-        d -= days_in_year;
+        let dy = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
+        if d < dy { break; }
+        d -= dy;
         y += 1;
     }
-
-    let months_days: &[i32] = if is_leap(y) {
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let md: &[i32] = if leap {
         &[31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
         &[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     };
-
     let mut m = 1;
-    for &md in months_days {
-        if d < md {
-            break;
-        }
-        d -= md;
+    for &days_in_month in md {
+        if d < days_in_month { break; }
+        d -= days_in_month;
         m += 1;
     }
-
-    format!(
-        "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
-        y, m, d + 1, hours, minutes, seconds
-    )
-}
-
-fn is_leap(y: i32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    format!("{:04}-{:02}-{:02}_{:02}-{:02}-{:02}", y, m, d + 1, hours, minutes, seconds)
 }
 
 // ================================================================

@@ -12,6 +12,7 @@ use super::GoodArtifactScannerConfig;
 use crate::scanner::common::backpack_scanner::{BackpackScanConfig, BackpackScanner, GridEvent, ScanAction};
 use crate::scanner::common::constants::*;
 use crate::scanner::common::coord_scaler::CoordScaler;
+use crate::scanner::common::equip_parser;
 use crate::scanner::common::fuzzy_match::fuzzy_match_map;
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::MappingManager;
@@ -82,7 +83,7 @@ fn pick_best_candidate(candidates: &[OcrCandidate]) -> Option<&OcrCandidate> {
 /// Computed OCR regions for artifact card (at 1920x1080 base).
 ///
 /// Coordinates derived from the old window_info JSON at 2560x1440, scaled by 0.75.
-struct ArtifactOcrRegions {
+pub struct ArtifactOcrRegions {
     part_name: (f64, f64, f64, f64),
     main_stat: (f64, f64, f64, f64),
     level: (f64, f64, f64, f64),
@@ -97,7 +98,7 @@ struct ArtifactOcrRegions {
 }
 
 impl ArtifactOcrRegions {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let card_x: f64 = 1307.0;
         let card_y: f64 = 119.0;
         let card_w: f64 = 494.0;
@@ -135,7 +136,7 @@ impl ArtifactOcrRegions {
 }
 
 /// Result of scanning a single artifact
-enum ArtifactScanResult {
+pub enum ArtifactScanResult {
     Artifact(GoodArtifact),
     Stop,
     Skip,
@@ -336,18 +337,18 @@ impl GoodArtifactScanner {
             .trim_end_matches(';')
             .trim();
 
-        log::debug!("[find_set_key] text={:?} cleaned={:?} map_size={}", text, cleaned, mappings.artifact_set_map.len());
+        debug!("[find_set_key] text={:?} cleaned={:?} map_size={}", text, cleaned, mappings.artifact_set_map.len());
 
         // Try cleaned text first
         if let Some(key) = fuzzy_match_map(cleaned, &mappings.artifact_set_map) {
-            log::debug!("[find_set_key] matched cleaned={:?} → {:?}", cleaned, key);
+            debug!("[find_set_key] matched cleaned={:?} → {:?}", cleaned, key);
             return Some(key);
         }
 
         // Try full text (in case cleaning removed something needed)
         if cleaned != text.trim() {
             if let Some(key) = fuzzy_match_map(text.trim(), &mappings.artifact_set_map) {
-                log::debug!("[find_set_key] matched full text={:?} → {:?}", text.trim(), key);
+                debug!("[find_set_key] matched full text={:?} → {:?}", text.trim(), key);
                 return Some(key);
             }
         }
@@ -362,12 +363,12 @@ impl GoodArtifactScanner {
                 continue;
             }
             if let Some(key) = fuzzy_match_map(line, &mappings.artifact_set_map) {
-                log::debug!("[find_set_key] matched line={:?} → {:?}", line, key);
+                debug!("[find_set_key] matched line={:?} → {:?}", line, key);
                 return Some(key);
             }
         }
 
-        log::debug!("[find_set_key] NO MATCH for text={:?}", text);
+        debug!("[find_set_key] NO MATCH for text={:?}", text);
         None
     }
 
@@ -403,38 +404,8 @@ impl GoodArtifactScanner {
         purple_count >= 2
     }
 
-    /// Parse equipped character from equip text.
     fn parse_equip_location(text: &str, mappings: &MappingManager) -> String {
-        // Check for "已装备" or truncated "已装"
-        let equip_marker = if text.contains("\u{5DF2}\u{88C5}\u{5907}") {
-            Some("\u{5DF2}\u{88C5}\u{5907}") // 已装备
-        } else if text.contains("\u{5DF2}\u{88C5}") {
-            Some("\u{5DF2}\u{88C5}") // 已装 (truncated)
-        } else {
-            None
-        };
-
-        if let Some(marker) = equip_marker {
-            let char_name = text
-                .replace(marker, "")
-                .replace(['\u{5907}', ':', '\u{FF1A}', ' '], "")
-                .trim()
-                .to_string();
-
-            // Strip leading ASCII noise and emojis from OCR
-            let cleaned: String = char_name
-                .trim_start_matches(|c: char| c.is_ascii() || !c.is_alphanumeric())
-                .to_string();
-
-            for name in [&cleaned, &char_name] {
-                if !name.is_empty() {
-                    if let Some(key) = fuzzy_match_map(name, &mappings.character_name_map) {
-                        return key;
-                    }
-                }
-            }
-        }
-        String::new()
+        equip_parser::parse_equip_location(text, &mappings.character_name_map)
     }
 
     /// OCR one substat line and return candidates.
@@ -498,7 +469,7 @@ impl GoodArtifactScanner {
     /// This is called from the worker thread with a checked-out OCR model.
     /// `ocr` = level engine (v5, good at reading "+20" style text)
     /// `substat_ocr` = general engine (v4, used for everything else: name, main stat, set, equip, substats)
-    fn scan_single_artifact(
+    pub fn scan_single_artifact(
         ocr: &dyn ImageToText<RgbImage>,
         substat_ocr: &dyn ImageToText<RgbImage>,
         image: &RgbImage,
@@ -599,7 +570,7 @@ impl GoodArtifactScanner {
         } else {
             None
         };
-        let _ = dump; // suppress unused warning for now
+        let _dump = dump;
 
         // 4. Level — dual-engine OCR, collect both for solver
         let parse_level = |text: &str| -> i32 {
@@ -630,7 +601,18 @@ impl GoodArtifactScanner {
                 level_text1.trim(), lv1, level_text2.trim(), lv2, level);
         }
 
-        // 5. Substats — dual-engine OCR, collect candidates, solve with roll validator.
+        // 5. Lock and astral mark (pixel-based, instant — done early so solver
+        //    failure warnings can include them)
+        let mut lock = pixel_utils::detect_artifact_lock(image, scaler, y_shift);
+        let astral_mark = pixel_utils::detect_artifact_astral_mark(image, scaler, y_shift);
+        // All astraled artifacts are locked in-game. If we still see
+        // astral=true + lock=false after the two-phase capture, force lock=true.
+        if astral_mark && !lock {
+            info!("[artifact] astral=true but lock=false — forcing lock=true (game invariant)");
+            lock = true;
+        }
+
+        // 6. Substats — dual-engine OCR, collect candidates, solve with roll validator.
         //
         // Phase 1: OCR both engines on each line, collect candidates for the solver.
         // Phase 2: Run roll solver to validate/select the correct combination.
@@ -642,38 +624,23 @@ impl GoodArtifactScanner {
         if lv2 >= 0 && lv2 != lv1 { level_candidates.push(lv2); }
         if level_candidates.is_empty() { level_candidates.push(0); }
 
+        // Maximum possible substat lines for this rarity and level.
+        // 5-star: always 4 (init 3+1 unactivated or init 4).
+        // 4-star lv0: max 3 (init 2 or 3, no 4th line possible).
+        // 4-star lv4+: max 4 (init 2→gained 3rd at lv4, or init 3→gained 4th).
+        let max_init = if rarity == 5 { 4 } else { 3 };
+        let max_scan_lines = ((max_init + level / 4) as usize).min(4);
+
         // Phase 1: OCR at original width
-        for i in 0..4 {
+        for i in 0..max_scan_lines {
             let sub_rect = ocr_regions.substat_lines[i];
             let (cands, stop, raw_texts) = Self::ocr_substat_line_candidates(
                 ocr, substat_ocr, image, sub_rect, y_shift, scaler,
             );
             if stop { break; }
 
-            // Also try number-only OCR for additional value candidates
             let (sub_x, sub_y, sub_w, sub_h) = sub_rect;
             let mut did_extend = false;
-            for c in &cands {
-                let is_pct = c.key.ends_with('_');
-                let crop_frac = crop_frac_for_stat(is_pct);
-                if let Ok(num_text) = Self::ocr_substat_number_crop(
-                    substat_ocr, image, (sub_x, sub_y, sub_w, sub_h), y_shift, scaler, crop_frac,
-                ) {
-                    if let Some(retry_val) = stat_parser::extract_number(num_text.trim()) {
-                        if (retry_val - c.value).abs() > 0.01 && retry_val > 0.5 {
-                            // Add as additional candidate with same key
-                            let mut extended = cands.clone();
-                            let already = extended.iter().any(|e| e.key == c.key && (e.value - retry_val).abs() < 0.01);
-                            if !already {
-                                extended.push(OcrCandidate { key: c.key.clone(), value: retry_val, inactive: c.inactive });
-                            }
-                            solver_candidates.push(extended);
-                            did_extend = true;
-                            break;
-                        }
-                    }
-                }
-            }
 
             // Rescue: when full-text parsing failed but OCR produced text,
             // try extracting the stat key from the raw text and get the value
@@ -901,11 +868,25 @@ impl GoodArtifactScanner {
             }
             (subs, unact, Some(result.total_rolls))
         } else {
-            // Phase 4: Fall back to heuristic — pick best candidate from each line.
-            // Reuses Phase 1 candidates (same image + OCR → identical to re-OCRing).
-            if config.verbose {
-                warn!("[artifact] solver failed, using heuristic fallback");
+            // Phase 4: Solver failed — could not find a valid roll assignment
+            // for all candidate lines. Use heuristic (best candidate per line)
+            // but ALWAYS warn the user with detailed context.
+            let mut line_details: Vec<String> = Vec::new();
+            for (i, cands) in non_empty_candidates.iter().enumerate() {
+                let best = pick_best_candidate(cands);
+                let detail = match best {
+                    Some(c) => format!("  sub[{}]: {}={}{}", i, c.key, c.value,
+                        if c.inactive { " (inactive)" } else { "" }),
+                    None => format!("  sub[{}]: (no candidates)", i),
+                };
+                line_details.push(detail);
             }
+            warn!("[artifact] SOLVER FAILED on {}* lv{} {} / {} (lock={}, astral={}, elixir={})\n\
+                   Detected {} substat lines but cannot find valid roll assignment:\n{}\n\
+                   Using heuristic fallback — substat values may be inaccurate.",
+                rarity, level, slot_key, main_stat_key, lock, astral_mark, elixir_crafted,
+                non_empty_candidates.len(), line_details.join("\n"));
+
             let mut subs = Vec::new();
             let mut unact = Vec::new();
             for cands in &non_empty_candidates {
@@ -1054,15 +1035,9 @@ impl GoodArtifactScanner {
             let equip_text_v5 = Self::ocr_image_region(ocr, image, ocr_regions.equip, scaler)?;
             location = Self::parse_equip_location(&equip_text_v5, mappings);
             if !location.is_empty() {
-                info!("[artifact] equip: v4「{}」failed, v5「{}」→ {}", equip_text.trim(), equip_text_v5.trim(), location);
+                debug!("[artifact] equip: v4「{}」failed, v5「{}」→ {}", equip_text.trim(), equip_text_v5.trim(), location);
             }
         }
-
-        // 9. Lock
-        let lock = pixel_utils::detect_artifact_lock(image, scaler, y_shift);
-
-        // 10. Astral mark
-        let astral_mark = pixel_utils::detect_artifact_astral_mark(image, scaler, y_shift);
 
         Ok(ArtifactScanResult::Artifact(GoodArtifact {
             set_key,
@@ -1116,25 +1091,6 @@ impl GoodArtifactScanner {
     /// to match set names OCR'd from the selection view detail panel.
     pub fn find_set_key_in_text_pub(text: &str, mappings: &MappingManager) -> Option<String> {
         Self::find_set_key_in_text(text, mappings)
-    }
-
-    /// Generate a fingerprint for row-level deduplication.
-    #[allow(dead_code)]
-    fn artifact_fingerprint(artifact: &GoodArtifact) -> String {
-        let subs: Vec<String> = artifact
-            .substats
-            .iter()
-            .map(|s| format!("{}:{}", s.key, s.value))
-            .collect();
-        format!(
-            "{}|{}|{}|{}|{}|{}",
-            artifact.set_key,
-            artifact.slot_key,
-            artifact.level,
-            artifact.main_stat_key,
-            artifact.rarity,
-            subs.join(";")
-        )
     }
 
     /// Scan all artifacts from the backpack.

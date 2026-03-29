@@ -318,34 +318,23 @@ pub fn solve(input: &SolverInput) -> Option<SolverResult> {
     levels.sort();
     levels.dedup();
 
-    // Generate all substat line selections (cartesian product).
-    // Each line contributes either one candidate or "empty" (no substat on that line).
+    // Each line must contribute one candidate — the solver explains all incoming
+    // stats, never drops them. Lines with no candidates are already filtered out
+    // before reaching the solver.
     let line_options: Vec<Vec<Option<&OcrCandidate>>> = input
         .substat_candidates
         .iter()
         .map(|cands| {
-            let mut opts: Vec<Option<&OcrCandidate>> = vec![None]; // "no substat" option
-            for c in cands {
-                opts.push(Some(c));
-            }
-            opts
+            cands.iter().map(|c| Some(c)).collect()
         })
         .collect();
-
-    let num_candidate_lines = line_options.len();
 
     // Try solving with original levels first
     let result = solve_with_levels(&levels, input.rarity, max_level, max_init, &line_options);
 
-    // If the solution uses fewer substats than available candidate lines AND
-    // a level < 10 was involved, try level+10 fallback — common OCR error:
-    // "11" misread as "1", "12" as "2", etc. Prefer the solution with more substats.
-    let needs_fallback = match &result {
-        None => true,
-        Some(r) => r.substats.len() < num_candidate_lines && r.level < 10,
-    };
-
-    if needs_fallback {
+    // If original levels failed, try level+10 fallback — common OCR error:
+    // "11" misread as "1", "12" as "2", etc.
+    if result.is_none() {
         let fallback_levels: Vec<i32> = levels.iter()
             .filter(|&&l| l >= 0 && l < 10)
             .map(|&l| l + 10)
@@ -353,12 +342,7 @@ pub fn solve(input: &SolverInput) -> Option<SolverResult> {
             .collect();
         if !fallback_levels.is_empty() {
             if let Some(fb) = solve_with_levels(&fallback_levels, input.rarity, max_level, max_init, &line_options) {
-                // Prefer the fallback if it uses more substats, or if original failed
-                match &result {
-                    None => return Some(fb),
-                    Some(r) if fb.substats.len() > r.substats.len() => return Some(fb),
-                    _ => {}
-                }
+                return Some(fb);
             }
         }
     }

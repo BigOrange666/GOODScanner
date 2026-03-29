@@ -29,11 +29,11 @@ pub const NO_CONSTELLATION_CHARACTERS: &[&str] = &["Aloy", "Manekin", "Manekina"
 
 pub const DEFAULT_DELAY_OPEN_SCREEN: u64 = 1500;
 pub const DEFAULT_DELAY_CLOSE_SCREEN: u64 = 500;
-pub const DEFAULT_DELAY_CHAR_TAB_SWITCH: u64 = 500;
-pub const DEFAULT_DELAY_CHAR_NEXT: u64 = 400;
+pub const DEFAULT_DELAY_CHAR_TAB_SWITCH: u64 = 450;
+pub const DEFAULT_DELAY_CHAR_NEXT: u64 = 250;
 pub const DEFAULT_DELAY_INV_TAB_SWITCH: u64 = 400;
 pub const DEFAULT_DELAY_SCROLL: u64 = 200;
-pub const DEFAULT_DELAY_GRID_ITEM: u64 = 100;
+pub const DEFAULT_DELAY_GRID_ITEM: u64 = 120;
 
 // ================================================================
 // Character scanner coordinates (at 1920x1080 base resolution)
@@ -143,10 +143,10 @@ pub const TAB_ARTIFACT: (f64, f64) = (675.0, 50.0);
 // Artifact scanner coordinates (at 1920x1080 base resolution)
 // ================================================================
 
-pub const ARTIFACT_PART_RECT: (f64, f64, f64, f64) = (1348.0, 190.0, 236.0, 40.0);
+pub const ARTIFACT_PART_RECT: (f64, f64, f64, f64) = (1348.0, 190.0, 200.0, 35.0);
 pub const ARTIFACT_MAIN_STAT_RECT: (f64, f64, f64, f64) = (1348.0, 283.0, 226.0, 35.0);
 pub const ARTIFACT_ELIXIR_RECT: (f64, f64, f64, f64) = (1360.0, 410.0, 140.0, 26.0);
-pub const ARTIFACT_LEVEL_RECT: (f64, f64, f64, f64) = (1358.0, 454.0, 70.0, 35.0);
+pub const ARTIFACT_LEVEL_RECT: (f64, f64, f64, f64) = (1360.0, 455.0, 65.0, 33.0);
 pub const ARTIFACT_SUBSTATS_RECT: (f64, f64, f64, f64) = (1353.0, 475.0, 247.0, 150.0);
 /// Base Y for set name; adjusted by -(4 - num_substats) * 40
 pub const ARTIFACT_SET_NAME_BASE_Y: f64 = 630.0;

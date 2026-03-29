@@ -29,12 +29,12 @@ pub enum GridEvent {
 pub struct BackpackScanConfig {
     pub delay_grid_item: u64,
     pub delay_scroll: u64,
-    /// Total delay (ms) after panel load, before capture.
+    /// Base delay (ms) after panel load, before capture.
     ///
     /// With two-phase capture enabled (via `needs_retry`), the first capture
-    /// attempt happens at half this value. If the icon state is ambiguous,
-    /// the scanner sleeps the remaining half and re-captures.
-    /// This means the full configured delay is the worst-case total.
+    /// happens at half this value. If the icon state is ambiguous, the scanner
+    /// sleeps a full `delay_after_panel` period and re-captures.
+    /// Worst-case total: 1.5x this value.
     pub delay_after_panel: u64,
 }
 
@@ -256,10 +256,10 @@ impl<'a> BackpackScanner<'a> {
 
                     // Two-phase capture for lock/astral icon animation.
                     // First attempt at half the configured delay; if icon
-                    // brightness is ambiguous (mid-animation), sleep the
-                    // remaining half and re-capture.
+                    // brightness is ambiguous (mid-animation), sleep a full
+                    // delay period and re-capture.
                     let first_delay = _config.delay_after_panel / 2;
-                    let retry_delay = _config.delay_after_panel - first_delay;
+                    let retry_delay = _config.delay_after_panel;
 
                     if first_delay > 0 {
                         utils::sleep(first_delay as u32);

@@ -141,18 +141,40 @@ impl GoodCharacterScanner {
     fn read_name_and_element(
         &self,
         ocr: &dyn ImageToText<RgbImage>,
+        name_v5_ocr: Option<&dyn ImageToText<RgbImage>>,
         ctrl: &GenshinGameController,
     ) -> Result<(Option<String>, Option<String>, String)> {
+        // Try v5 first for character name — v4 dict lacks some characters (e.g. 魈/Xiao).
+        // v5 is strictly better on names per eval (111 correct vs 110 for v4).
+        if let Some(v5) = name_v5_ocr {
+            let text_v5 = Self::ocr_rect(v5, ctrl, CHAR_NAME_RECT)?;
+            let (name_v5, element_v5) = self.parse_name_and_element(&text_v5);
+            if name_v5.is_some() {
+                debug!("[character] name OCR (v5): {:?} -> {:?}", text_v5, name_v5);
+                return Ok((name_v5, element_v5, text_v5));
+            }
+        }
+
+        // v4 fallback (or primary if no v5 available)
         let text = Self::ocr_rect(ocr, ctrl, CHAR_NAME_RECT)?;
         let (name, element) = self.parse_name_and_element(&text);
-
         if name.is_some() {
-            debug!("[character] name OCR: {:?} -> {:?}", text, name);
+            debug!("[character] name OCR (v4): {:?} -> {:?}", text, name);
             return Ok((name, element, text));
         }
 
         warn!("[character] first name match failed: \u{300C}{}\u{300D}, retrying...", text);
         utils::sleep(1000);
+
+        // Retry: v5 first, then v4
+        if let Some(v5) = name_v5_ocr {
+            let text_v5 = Self::ocr_rect(v5, ctrl, CHAR_NAME_RECT)?;
+            let (name_v5, element_v5) = self.parse_name_and_element(&text_v5);
+            if name_v5.is_some() {
+                debug!("[character] name retry (v5): {:?} -> {:?}", text_v5, name_v5);
+                return Ok((name_v5, element_v5, text_v5));
+            }
+        }
 
         let text2 = Self::ocr_rect(ocr, ctrl, CHAR_NAME_RECT)?;
         let (name2, element2) = self.parse_name_and_element(&text2);
@@ -718,6 +740,7 @@ impl GoodCharacterScanner {
     fn scan_single_character(
         &self,
         ocr_pool: &OcrPool,
+        name_fallback_ocr: Option<&dyn ImageToText<RgbImage>>,
         ctrl: &mut GenshinGameController,
         first_name: &Option<String>,
         reverse: bool,
@@ -726,7 +749,7 @@ impl GoodCharacterScanner {
         let ocr = ocr_pool.get();
 
         // Name and element are visible from any tab
-        let (name, element, raw_text) = self.read_name_and_element(&ocr, ctrl)?;
+        let (name, element, raw_text) = self.read_name_and_element(&ocr, name_fallback_ocr, ctrl)?;
 
         let name = match name {
             Some(n) => n,
@@ -874,7 +897,9 @@ impl GoodCharacterScanner {
             move || ocr_factory::create_ocr_model(&ocr_backend),
             pool_size,
         )?;
-        debug!("[character] OCR pool: {} instances", pool_size);
+        // v5 fallback for character name — v4 dict lacks some chars (e.g. 魈/Xiao)
+        let name_fallback = ocr_factory::create_ocr_model("ppocrv5")?;
+        debug!("[character] OCR pool: {} instances + v5 name fallback", pool_size);
 
         // Return to main world using BGI-style strategy:
         // press Escape one at a time, verify after each press.
@@ -936,7 +961,7 @@ impl GoodCharacterScanner {
                 break;
             }
 
-            let result = self.scan_single_character(&ocr_pool, ctrl, &first_name, reverse, viewed_count);
+            let result = self.scan_single_character(&ocr_pool, Some(name_fallback.as_ref()), ctrl, &first_name, reverse, viewed_count);
 
             match result {
                 Ok((Some(character), meta)) => {
@@ -1011,20 +1036,20 @@ impl GoodCharacterScanner {
             })
             .map(|(i, c)| {
                 warn!(
-                    "[character] suspicious result at index {}: {} Lv.{} C{} {}/{}/{}",
-                    i, c.key, c.level, c.constellation,
+                    "[character] suspicious result at index {}: {} Lv.{} A{} C{} {}/{}/{}",
+                    i, c.key, c.level, c.ascension, c.constellation,
                     c.talent.auto, c.talent.skill, c.talent.burst
                 );
                 i
             })
             .collect();
 
-        if !suspicious_indices.is_empty() {
+        if !suspicious_indices.is_empty() && !utils::was_aborted() {
             info!(
                 "[character] second pass: rescanning {} suspicious characters",
                 suspicious_indices.len()
             );
-            self.rescan_suspicious(ctrl, &ocr_pool, &mut characters, &suspicious_indices);
+            self.rescan_suspicious(ctrl, &ocr_pool, Some(name_fallback.as_ref()), &mut characters, &suspicious_indices);
         }
 
         // Final sanitize: snap any remaining illegal levels to nearest valid value.
@@ -1119,6 +1144,7 @@ impl GoodCharacterScanner {
         &self,
         ctrl: &mut GenshinGameController,
         ocr_pool: &OcrPool,
+        name_fallback_ocr: Option<&dyn ImageToText<RgbImage>>,
         characters: &mut Vec<GoodCharacter>,
         suspicious_indices: &[usize],
     ) {
@@ -1180,7 +1206,7 @@ impl GoodCharacterScanner {
             let ocr = ocr_pool.get();
 
             // Verify we're looking at the right character
-            let (name, _element, _raw) = self.read_name_and_element(&ocr, ctrl)
+            let (name, _element, _raw) = self.read_name_and_element(&ocr, name_fallback_ocr, ctrl)
                 .unwrap_or((None, None, String::new()));
             if name.as_deref() != Some(&old.key) {
                 warn!(
@@ -1222,12 +1248,21 @@ impl GoodCharacterScanner {
             let talents_improved = new_talent_ones < old_talent_ones;
 
             if level_improved || constellation_changed || talents_improved {
+                let mut changes = Vec::new();
+                if level_improved {
+                    changes.push(format!("Lv.{}→{}", old.level, new_level));
+                }
+                if constellation_changed {
+                    changes.push(format!("C{}→{}", old.constellation, new_constellation));
+                }
+                if talents_improved || constellation_changed {
+                    changes.push(format!("{}/{}/{}→{}/{}/{}",
+                        old.talent.auto, old.talent.skill, old.talent.burst,
+                        new_auto, new_skill, new_burst));
+                }
                 info!(
-                    "[character] rescan #{} {}: Lv.{}->{} C{}->{} {}/{}/{}->{}/{}/{}",
-                    target_idx, old.key, old.level, new_level,
-                    old.constellation, new_constellation,
-                    old.talent.auto, old.talent.skill, old.talent.burst,
-                    new_auto, new_skill, new_burst
+                    "[character] rescan #{} {}: {}",
+                    target_idx, old.key, changes.join(", ")
                 );
                 let c = &mut characters[target_idx];
                 if level_improved {
@@ -1244,9 +1279,9 @@ impl GoodCharacterScanner {
                     c.talent.burst = new_burst;
                 }
             } else {
-                info!(
-                    "[character] rescan #{} {}: no change (Lv.{} C{} {}/{}/{})",
-                    target_idx, old.key, new_level, new_constellation, new_auto, new_skill, new_burst
+                debug!(
+                    "[character] rescan #{} {}: no change",
+                    target_idx, old.key
                 );
             }
         }
@@ -1275,7 +1310,7 @@ impl GoodCharacterScanner {
 
         // Name + element
         let t = Instant::now();
-        let (name, element, raw_text) = self.read_name_and_element(ocr, ctrl)
+        let (name, element, raw_text) = self.read_name_and_element(ocr, None, ctrl)
             .unwrap_or((None, None, String::new()));
         let name_key = name.unwrap_or_default();
         fields.push(DebugOcrField {

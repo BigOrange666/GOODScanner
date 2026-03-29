@@ -38,9 +38,12 @@ pub fn is_star_yellow(image: &RgbImage, scaler: &CoordScaler, base_x: f64, base_
 // ================================================================
 
 /// Brightness at or below which the icon is definitively present (locked / astral marked).
-pub const ICON_BRIGHT_PRESENT: u32 = 130;
+/// True dark value is 86, true bright value is 238 (gap=152).
+/// Set at 1/5 of the range so mid-animation frames trigger a retry capture.
+pub const ICON_BRIGHT_PRESENT: u32 = 116;
 /// Brightness at or above which the icon is definitively absent (unlocked / no astral).
-pub const ICON_BRIGHT_ABSENT: u32 = 210;
+/// Set at 4/5 of the range for the same reason.
+pub const ICON_BRIGHT_ABSENT: u32 = 208;
 
 /// Get the average brightness of a pixel at base 1920x1080 coordinates.
 /// Returns 0 if out of bounds.
@@ -61,6 +64,10 @@ pub fn get_pixel_brightness(image: &RgbImage, scaler: &CoordScaler, base_x: f64,
 /// Checks artifact lock and astral positions (without elixir y_shift,
 /// which is unknown at early-capture time; elixir artifacts will simply
 /// fall through to the full delay, which is correct).
+///
+/// Also checks for impossible semantic state: astral present but lock absent.
+/// All astraled artifacts are locked in-game, so this means the lock icon
+/// animation hasn't settled yet.
 pub fn is_artifact_icon_ambiguous(image: &RgbImage, scaler: &CoordScaler) -> bool {
     use super::constants::{ARTIFACT_LOCK_POS1, ARTIFACT_ASTRAL_POS1};
     let lock_b = get_pixel_brightness(image, scaler, ARTIFACT_LOCK_POS1.0, ARTIFACT_LOCK_POS1.1);
@@ -69,6 +76,13 @@ pub fn is_artifact_icon_ambiguous(image: &RgbImage, scaler: &CoordScaler) -> boo
     }
     let astral_b = get_pixel_brightness(image, scaler, ARTIFACT_ASTRAL_POS1.0, ARTIFACT_ASTRAL_POS1.1);
     if astral_b >= ICON_BRIGHT_PRESENT && astral_b <= ICON_BRIGHT_ABSENT {
+        return true;
+    }
+    // Impossible state: astral present (dark) but lock not present.
+    // All astraled artifacts must be locked — retry to let lock icon settle.
+    let astral_present = astral_b <= ICON_BRIGHT_PRESENT;
+    let lock_present = lock_b <= ICON_BRIGHT_PRESENT;
+    if astral_present && !lock_present {
         return true;
     }
     false

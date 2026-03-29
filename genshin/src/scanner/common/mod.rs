@@ -14,3 +14,4 @@ pub mod scan_worker;
 pub mod diff;
 pub mod debug_dump;
 pub mod roll_solver;
+pub mod equip_parser;

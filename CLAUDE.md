@@ -1,5 +1,9 @@
 # Yas — Genshin Impact Scanner
 
+## IMPORTANT: Build Rules
+
+- **NEVER kill GOODScanner.exe or any user process to unblock a build.** If `cargo build` fails with "access denied" because the exe is locked, tell the user and wait. If they confirm the process can be stopped, wait for it to exit on its own or let the user close it.
+
 ## Overview
 
 Yas (Yet Another Scanner) is a Rust application that scans Genshin Impact in-game data (characters, weapons, artifacts) using OCR and exports it in **GOOD v3** (Genshin Open Object Description) format for use with optimizer tools.
