@@ -430,6 +430,10 @@ where
             }
         };
 
+        // Check before request is consumed — needed for cache invalidation below
+        let has_lock_instructions = request.instructions.iter()
+            .any(|i| i.changes.lock.is_some());
+
         let (result, artifact_snapshot) = exec.execute(request, Some(&progress_fn));
 
         // Update artifact cache based on scan completeness
@@ -440,15 +444,15 @@ where
                 info!("[job {}] 圣遗物快照已更新（{} 个）/ Artifact snapshot updated ({} items)", job_id, count, count);
             }
             None => {
-                // Scan was incomplete (interrupted, early stop, or no lock changes)
-                // Mark as incomplete so GET /artifacts returns 503 instead of stale data
-                let mut cache = artifact_cache.lock().unwrap();
-                if !matches!(*cache, ArtifactCache::Empty) {
-                    // Only mark incomplete if we previously had data — don't downgrade Empty
-                    // if this was an equip-only job (no scan at all).
-                    if result.results.iter().any(|r| r.status == InstructionStatus::Aborted) {
+                // No snapshot returned — scan was incomplete (interrupted, early stop,
+                // stop_on_all_matched, or equip-only job with no scan phase).
+                // If this job had lock instructions, the in-game state has changed
+                // and any cached snapshot is now stale.
+                if has_lock_instructions {
+                    let mut cache = artifact_cache.lock().unwrap();
+                    if matches!(*cache, ArtifactCache::Complete(_)) {
                         *cache = ArtifactCache::Incomplete;
-                        info!("[job {}] 扫描被中断，圣遗物快照已失效 / Scan interrupted, artifact snapshot invalidated", job_id);
+                        info!("[job {}] 锁操作已执行但扫描未完成，快照已失效 / Lock changes applied but scan incomplete, artifact snapshot invalidated", job_id);
                     }
                 }
             }
@@ -1255,6 +1259,55 @@ mod tests {
         poll_until_completed(port);
 
         // Cache should now be 503 (Incomplete)
+        let resp = client.get(format!("{}/artifacts", base)).send().unwrap();
+        assert_eq!(resp.status().as_u16(), 503);
+
+        stop_server(&shutdown, handle);
+    }
+
+    #[test]
+    fn test_artifacts_invalidated_when_lock_job_returns_no_snapshot() {
+        // Regression: stop_on_all_matched early stop returns all Success but
+        // no artifact snapshot. The cache must still be invalidated because
+        // lock changes were applied in-game.
+        let mut responses = VecDeque::new();
+        // Job 1: complete scan with snapshot
+        let artifacts = vec![make_artifact("GladiatorsFinale", "flower", 20, true)];
+        responses.push_back((
+            make_result(&[("a", InstructionStatus::Success)]),
+            Some(artifacts),
+        ));
+        // Job 2: all Success (early stop via stop_on_all_matched), but no snapshot
+        responses.push_back((
+            make_result(&[("b", InstructionStatus::Success)]),
+            None,
+        ));
+        let (port, shutdown, handle) = start_test_server(responses, 0);
+        let client = reqwest::blocking::Client::new();
+        let base = format!("http://127.0.0.1:{}", port);
+
+        // Job 1 — populates cache
+        client
+            .post(format!("{}/manage", base))
+            .header("Content-Type", "application/json")
+            .body(make_manage_body(&["a"]))
+            .send()
+            .unwrap();
+        poll_until_completed(port);
+
+        let resp = client.get(format!("{}/artifacts", base)).send().unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        // Job 2 — lock instructions present, Success status, but no snapshot
+        client
+            .post(format!("{}/manage", base))
+            .header("Content-Type", "application/json")
+            .body(make_manage_body(&["b"]))
+            .send()
+            .unwrap();
+        poll_until_completed(port);
+
+        // Cache must be invalidated (503), not stale 200
         let resp = client.get(format!("{}/artifacts", base)).send().unwrap();
         assert_eq!(resp.status().as_u16(), 503);
 
