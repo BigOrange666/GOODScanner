@@ -244,6 +244,34 @@ pub fn detect_artifact_rarity(image: &RgbImage, scaler: &CoordScaler) -> i32 {
     rarity
 }
 
+/// Check if an artifact's detected rarity is below the minimum threshold.
+pub fn artifact_below_min_rarity(image: &RgbImage, scaler: &CoordScaler, min_rarity: i32) -> bool {
+    let rarity = detect_artifact_rarity(image, scaler);
+    if rarity < min_rarity {
+        log::debug!(
+            "[rarity] {}星 < 最低{}星，应停止 / [rarity] {}* < min {}*, should stop",
+            rarity, min_rarity, rarity, min_rarity
+        );
+        true
+    } else {
+        false
+    }
+}
+
+/// Check if a weapon's detected rarity is below the minimum threshold.
+pub fn weapon_below_min_rarity(image: &RgbImage, scaler: &CoordScaler, min_rarity: i32) -> bool {
+    let rarity = detect_weapon_rarity(image, scaler);
+    if rarity < min_rarity {
+        log::debug!(
+            "[rarity] {}星 < 最低{}星，应停止 / [rarity] {}* < min {}*, should stop",
+            rarity, min_rarity, rarity, min_rarity
+        );
+        true
+    } else {
+        false
+    }
+}
+
 /// Detect if a substat line region appears dimmed (inactive/unactivated).
 ///
 /// Active substats have bright white text (brightness > 200).

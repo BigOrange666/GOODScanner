@@ -17,16 +17,18 @@ use crate::scanner::common::pixel_utils;
 
 use super::matching;
 use super::models::*;
+use super::orchestrator::LockTarget;
 use super::ui_actions;
 
-/// Phase 1: Single-pass artifact backpack scan with per-page lock toggling.
+/// Single-pass artifact backpack scan with per-page lock toggling.
 ///
-/// Reuses the same backpack opening, grid coordinates, two-phase capture,
-/// and `identify_artifact` OCR as the artifact scanner. Lock toggles are
-/// applied per-page before scrolling, so there is no second pass.
+/// Accepts `LockTarget` slices from the orchestrator. Each target specifies
+/// an artifact to match and the desired lock state. Rarity early-stop:
+/// when a scanned artifact has rarity < 4, the current page is finished
+/// but no further items are dispatched.
 ///
-/// 阶段一：单次遍历圣遗物背包，每页扫描后直接切换锁定。
-/// 复用圣遗物扫描器的背包打开、网格坐标、两阶段截图和 OCR。
+/// 单次遍历圣遗物背包，每页扫描后直接切换锁定。
+/// 当检测到稀有度 < 4 时，完成当前页后停止扫描。
 pub struct LockManager {
     mappings: Arc<MappingManager>,
     ocr_backend: String,
@@ -35,7 +37,7 @@ pub struct LockManager {
 
 /// An artifact identified on the current page that needs a lock toggle.
 struct PageToggle {
-    instr_id: String,
+    result_id: String,
     /// Row within the current visible page (0-based).
     row: usize,
     /// Column (0-based).
@@ -58,29 +60,37 @@ impl LockManager {
         Self { mappings, ocr_backend, substat_ocr_backend }
     }
 
-    /// Execute lock change instructions by scanning the artifact backpack.
+    /// Execute lock change targets by scanning the artifact backpack.
     ///
-    /// Returns results for all provided instructions plus the list of scanned
-    /// artifacts (for Phase 2 reuse).
+    /// Returns:
+    /// - Results for processed targets
+    /// - Scanned artifacts as (index, artifact)
+    /// - Map from target vec index -> scanned artifact index (for snapshot building)
+    /// - Whether the scan completed fully (all items visited, no interruption)
     ///
-    /// Uses the same opening sequence and grid navigation as the artifact
-    /// scanner, with lock toggles applied per-page before scrolling.
-    ///
-    /// 执行锁定变更指令。返回：
-    /// - 所有指令的执行结果
+    /// 执行锁定变更目标。返回：
+    /// - 已处理目标的结果
     /// - 扫描到的圣遗物列表 (index, artifact)
-    /// - 指令ID→圣遗物索引的映射（用于分类）
-    /// - 扫描是否完整（遍历了所有圣遗物，未被中断或提前终止）
+    /// - 目标向量索引→圣遗物索引的映射
+    /// - 扫描是否完整
     pub fn execute(
         &self,
         ctrl: &mut GenshinGameController,
-        instructions: &[ArtifactInstruction],
+        targets: &[LockTarget],
         delay_grid_item: u64,
         delay_scroll: u64,
         stop_on_all_matched: bool,
-    ) -> (Vec<InstructionResult>, Vec<(usize, GoodArtifact)>, HashMap<String, usize>, bool) {
+    ) -> (Vec<InstructionResult>, Vec<(usize, GoodArtifact)>, HashMap<usize, usize>, bool) {
         let mut results: HashMap<String, InstructionResult> = HashMap::new();
         let mut scanned_artifacts: Vec<(usize, GoodArtifact)> = Vec::new();
+
+        let make_error_results = |targets: &[LockTarget], status: InstructionStatus, detail: String| -> Vec<InstructionResult> {
+            targets.iter().map(|t| InstructionResult {
+                id: t.result_id.clone(),
+                status: status.clone(),
+                detail: Some(detail.clone()),
+            }).collect()
+        };
 
         // Create OCR pools (same sizes as artifact scanner: 2 main + 5 substat)
         let ocr_backend = self.ocr_backend.clone();
@@ -92,11 +102,7 @@ impl LockManager {
             Err(e) => {
                 warn!("OCR模型创建失败 / OCR model creation failed: {}", e);
                 return (
-                    instructions.iter().map(|i| InstructionResult {
-                        id: i.id.clone(),
-                        status: InstructionStatus::OcrError,
-                        detail: Some(format!("OCR模型创建失败 / OCR model creation failed: {}", e)),
-                    }).collect(),
+                    make_error_results(targets, InstructionStatus::OcrError, format!("OCR模型创建失败 / OCR model creation failed: {}", e)),
                     scanned_artifacts,
                     HashMap::new(),
                     false,
@@ -112,11 +118,7 @@ impl LockManager {
             Err(e) => {
                 warn!("副属性OCR模型创建失败 / Substat OCR model creation failed: {}", e);
                 return (
-                    instructions.iter().map(|i| InstructionResult {
-                        id: i.id.clone(),
-                        status: InstructionStatus::OcrError,
-                        detail: Some(format!("OCR模型创建失败 / OCR model creation failed: {}", e)),
-                    }).collect(),
+                    make_error_results(targets, InstructionStatus::OcrError, format!("OCR模型创建失败 / OCR model creation failed: {}", e)),
                     scanned_artifacts,
                     HashMap::new(),
                     false,
@@ -129,11 +131,7 @@ impl LockManager {
             Err(e) => {
                 warn!("OCR模型创建失败 / OCR model creation failed: {}", e);
                 return (
-                    instructions.iter().map(|i| InstructionResult {
-                        id: i.id.clone(),
-                        status: InstructionStatus::OcrError,
-                        detail: Some(format!("OCR模型创建失败 / OCR model creation failed: {}", e)),
-                    }).collect(),
+                    make_error_results(targets, InstructionStatus::OcrError, format!("OCR模型创建失败 / OCR model creation failed: {}", e)),
                     scanned_artifacts,
                     HashMap::new(),
                     false,
@@ -141,21 +139,12 @@ impl LockManager {
             }
         };
 
-        // Build targets for matching (only instructions with lock changes)
-        let targets: Vec<(usize, &ArtifactTarget)> = instructions.iter()
-            .enumerate()
-            .filter(|(_, i)| i.changes.lock.is_some())
-            .map(|(idx, i)| (idx, &i.target))
-            .collect();
-
         if targets.is_empty() {
             return (Vec::new(), scanned_artifacts, HashMap::new(), false);
         }
 
-        // Track which instructions have been matched
+        // Track which targets have been matched (target vec index -> scanned artifact index)
         let mut matched: HashMap<usize, usize> = HashMap::new();
-        // instruction_id → scanned artifact index (for categorization by caller)
-        let mut matched_ids: HashMap<String, usize> = HashMap::new();
 
         // --- Open backpack to artifact tab (same as artifact scanner) ---
         let total = match backpack_scanner::open_backpack_to_tab(
@@ -168,11 +157,7 @@ impl LockManager {
             Err(e) => {
                 warn!("无法读取圣遗物数量 / Cannot read artifact count: {}", e);
                 return (
-                    instructions.iter().map(|i| InstructionResult {
-                        id: i.id.clone(),
-                        status: InstructionStatus::OcrError,
-                        detail: Some(format!("无法读取数量 / Cannot read count: {}", e)),
-                    }).collect(),
+                    make_error_results(targets, InstructionStatus::OcrError, format!("无法读取数量 / Cannot read count: {}", e)),
                     scanned_artifacts,
                     HashMap::new(),
                     false,
@@ -183,8 +168,8 @@ impl LockManager {
         if total == 0 {
             info!("[lock_manager] 背包中没有圣遗物 / No artifacts in backpack");
             return (
-                instructions.iter().filter(|i| i.changes.lock.is_some()).map(|i| InstructionResult {
-                    id: i.id.clone(),
+                targets.iter().map(|t| InstructionResult {
+                    id: t.result_id.clone(),
                     status: InstructionStatus::NotFound,
                     detail: Some("背包中没有圣遗物 / No artifacts in backpack".to_string()),
                 }).collect(),
@@ -210,6 +195,7 @@ impl LockManager {
         let mut scanned_count: usize = 0;
         let mut scanned_row: usize = 0;
         let mut pages_scrolled: u32 = 0;
+        let mut stop_after_page = false;
 
         let scaler_arc = Arc::new(scaler.clone());
 
@@ -231,6 +217,11 @@ impl LockManager {
 
                 for col in 0..row_cols {
                     if ctrl.check_rmb() || scanned_count >= total {
+                        break 'outer;
+                    }
+
+                    // If rarity early-stop triggered, don't dispatch more items
+                    if stop_after_page {
                         break 'outer;
                     }
 
@@ -266,6 +257,17 @@ impl LockManager {
                                 continue;
                             }
                         };
+                    }
+
+                    // Rarity early-stop: check if artifact rarity is below minimum (4)
+                    if pixel_utils::artifact_below_min_rarity(&image, &scaler, 4) {
+                        info!(
+                            "[lock_manager] 检测到低稀有度圣遗物，当前页后停止 / Low rarity artifact detected, stopping after current page"
+                        );
+                        stop_after_page = true;
+                        // Don't dispatch this item, don't increment scanned_count
+                        // Break inner loops to go to page collection
+                        break 'outer;
                     }
 
                     // Dispatch OCR to rayon immediately (runs in parallel with next capture)
@@ -311,44 +313,40 @@ impl LockManager {
             // Sort by index to maintain grid order
             page_results.sort_by_key(|(idx, _, _, _)| *idx);
 
-            // Step 3: Match against instructions, collect per-page toggles
+            // Step 3: Match against targets, collect per-page toggles
             let mut page_toggles: Vec<PageToggle> = Vec::new();
 
             for (idx, row, col, artifact_opt) in &page_results {
                 if let Some(ref artifact) = artifact_opt {
                     scanned_artifacts.push((*idx, artifact.clone()));
 
-                    // Match against unmatched instructions
-                    let unmatched_converted: Vec<(usize, GoodArtifact)> = targets.iter()
+                    // Build unmatched target list for matching
+                    let unmatched: Vec<(usize, &GoodArtifact)> = targets.iter()
+                        .enumerate()
                         .filter(|(i, _)| !matched.contains_key(i))
-                        .map(|&(i, t)| (i, GoodArtifact::from(t)))
-                        .collect();
-                    let unmatched: Vec<(usize, &GoodArtifact)> = unmatched_converted.iter()
-                        .map(|(i, a)| (*i, a))
+                        .map(|(i, t)| (i, &t.artifact))
                         .collect();
 
-                    if let Some((instr_idx, _score)) = matching::find_best_match(artifact, &unmatched) {
-                        matched.insert(instr_idx, *idx);
-                        let instr = &instructions[instr_idx];
-                        matched_ids.insert(instr.id.clone(), *idx);
-                        let desired_lock = instr.changes.lock.unwrap();
+                    if let Some((target_idx, _score)) = matching::find_best_match(artifact, &unmatched) {
+                        matched.insert(target_idx, *idx);
+                        let target = &targets[target_idx];
 
-                        if artifact.lock == desired_lock {
-                            results.insert(instr.id.clone(), InstructionResult {
-                                id: instr.id.clone(),
+                        if artifact.lock == target.desired_lock {
+                            results.insert(target.result_id.clone(), InstructionResult {
+                                id: target.result_id.clone(),
                                 status: InstructionStatus::AlreadyCorrect,
                                 detail: Some(format!(
                                     "锁定状态已正确 / Lock already {}",
-                                    if desired_lock { "locked" } else { "unlocked" }
+                                    if target.desired_lock { "locked" } else { "unlocked" }
                                 )),
                             });
                         } else {
                             let y_shift = if artifact.elixir_crafted { 40.0 } else { 0.0 };
                             page_toggles.push(PageToggle {
-                                instr_id: instr.id.clone(),
+                                result_id: target.result_id.clone(),
                                 row: *row,
                                 col: *col,
-                                desired_lock,
+                                desired_lock: target.desired_lock,
                                 y_shift,
                             });
                         }
@@ -359,8 +357,8 @@ impl LockManager {
             // Step 4: Apply lock toggles for this page (before scrolling)
             for toggle in &page_toggles {
                 if ctrl.check_rmb() {
-                    results.insert(toggle.instr_id.clone(), InstructionResult {
-                        id: toggle.instr_id.clone(),
+                    results.insert(toggle.result_id.clone(), InstructionResult {
+                        id: toggle.result_id.clone(),
                         status: InstructionStatus::Aborted,
                         detail: Some(format!("{}", ctrl.cancel_token().reason().unwrap())),
                     });
@@ -376,8 +374,8 @@ impl LockManager {
 
                 // Toggle lock
                 if let Err(e) = ui_actions::click_lock_button(ctrl, toggle.y_shift) {
-                    results.insert(toggle.instr_id.clone(), InstructionResult {
-                        id: toggle.instr_id.clone(),
+                    results.insert(toggle.result_id.clone(), InstructionResult {
+                        id: toggle.result_id.clone(),
                         status: InstructionStatus::UiError,
                         detail: Some(format!("锁定切换失败 / Lock toggle failed: {}", e)),
                     });
@@ -390,8 +388,8 @@ impl LockManager {
                     Ok(img) => img,
                     Err(e) => {
                         warn!("[lock_manager] 截图失败 / Capture failed: {}", e);
-                        results.insert(toggle.instr_id.clone(), InstructionResult {
-                            id: toggle.instr_id.clone(),
+                        results.insert(toggle.result_id.clone(), InstructionResult {
+                            id: toggle.result_id.clone(),
                             status: InstructionStatus::UiError,
                             detail: Some(format!("截图失败 / Capture failed: {}", e)),
                         });
@@ -405,8 +403,8 @@ impl LockManager {
                         "[lock_manager] 锁定切换成功 ({},{}) / Lock toggle success",
                         toggle.row, toggle.col
                     );
-                    results.insert(toggle.instr_id.clone(), InstructionResult {
-                        id: toggle.instr_id.clone(),
+                    results.insert(toggle.result_id.clone(), InstructionResult {
+                        id: toggle.result_id.clone(),
                         status: InstructionStatus::Success,
                         detail: None,
                     });
@@ -415,8 +413,8 @@ impl LockManager {
                         "[lock_manager] 锁定验证失败 ({},{}): 期望={} 实际={} / Lock verify failed",
                         toggle.row, toggle.col, toggle.desired_lock, new_lock
                     );
-                    results.insert(toggle.instr_id.clone(), InstructionResult {
-                        id: toggle.instr_id.clone(),
+                    results.insert(toggle.result_id.clone(), InstructionResult {
+                        id: toggle.result_id.clone(),
                         status: InstructionStatus::UiError,
                         detail: Some(format!(
                             "锁定切换验证失败（期望={}，实际={}）/ \
@@ -427,9 +425,15 @@ impl LockManager {
                 }
             }
 
-            // Early stop if all instructions matched (only when configured)
+            // If rarity early-stop was triggered, break after processing this page
+            if stop_after_page {
+                info!("[lock_manager] 低稀有度停止：当前页已处理完毕 / Rarity early-stop: current page processed");
+                break;
+            }
+
+            // Early stop if all targets matched (only when configured)
             if stop_on_all_matched && matched.len() == targets.len() {
-                info!("[lock_manager] 所有指令已匹配，提前停止 / All instructions matched, stopping early");
+                info!("[lock_manager] 所有目标已匹配，提前停止 / All targets matched, stopping early");
                 break;
             }
 
@@ -470,15 +474,15 @@ impl LockManager {
             yas::utils::sleep(delay_scroll as u32);
         }
 
-        // Scan is complete only if we visited every item without interruption
-        let scan_complete = scanned_count >= total && !ctrl.is_cancelled();
+        // Scan is complete only if we visited every item without interruption and no early-stop
+        let scan_complete = scanned_count >= total && !ctrl.is_cancelled() && !stop_after_page;
 
-        // Mark unmatched instructions
+        // Mark unmatched targets
         let was_cancelled = ctrl.is_cancelled();
-        for instr in instructions {
-            if instr.changes.lock.is_some() && !results.contains_key(&instr.id) {
-                results.insert(instr.id.clone(), InstructionResult {
-                    id: instr.id.clone(),
+        for target in targets {
+            if !results.contains_key(&target.result_id) {
+                results.insert(target.result_id.clone(), InstructionResult {
+                    id: target.result_id.clone(),
                     status: if was_cancelled {
                         InstructionStatus::Aborted
                     } else {
@@ -493,11 +497,11 @@ impl LockManager {
             }
         }
 
-        // Collect results in instruction order
-        let ordered_results: Vec<InstructionResult> = instructions.iter()
-            .filter_map(|i| results.remove(&i.id))
+        // Collect results in target order
+        let ordered_results: Vec<InstructionResult> = targets.iter()
+            .filter_map(|t| results.remove(&t.result_id))
             .collect();
 
-        (ordered_results, scanned_artifacts, matched_ids, scan_complete)
+        (ordered_results, scanned_artifacts, matched, scan_complete)
     }
 }

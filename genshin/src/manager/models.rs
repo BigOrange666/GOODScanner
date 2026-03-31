@@ -25,23 +25,9 @@ pub struct LockManageRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy types — kept temporarily for other modules still referencing them.
-// Will be removed as subsequent tasks migrate callers to LockManageRequest.
+// Legacy types — kept temporarily for ui_actions.rs which still references
+// ArtifactTarget. Will be removed when ui_actions is migrated.
 // ---------------------------------------------------------------------------
-
-/// DEPRECATED: Use `LockManageRequest` instead.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArtifactManageRequest {
-    pub instructions: Vec<ArtifactInstruction>,
-}
-
-/// DEPRECATED: Use `LockManageRequest` instead.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArtifactInstruction {
-    pub id: String,
-    pub target: ArtifactTarget,
-    pub changes: ArtifactChanges,
-}
 
 /// DEPRECATED: Use `GoodArtifact` for matching instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,34 +41,6 @@ pub struct ArtifactTarget {
     #[serde(rename = "mainStatKey")]
     pub main_stat_key: String,
     pub substats: Vec<GoodSubStat>,
-}
-
-impl From<&ArtifactTarget> for GoodArtifact {
-    fn from(t: &ArtifactTarget) -> Self {
-        GoodArtifact {
-            set_key: t.set_key.clone(),
-            slot_key: t.slot_key.clone(),
-            rarity: t.rarity,
-            level: t.level,
-            main_stat_key: t.main_stat_key.clone(),
-            substats: t.substats.clone(),
-            location: String::new(),
-            lock: false,
-            astral_mark: false,
-            elixir_crafted: false,
-            unactivated_substats: Vec::new(),
-            total_rolls: None,
-        }
-    }
-}
-
-/// DEPRECATED: Use list membership in `LockManageRequest` instead.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArtifactChanges {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lock: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub location: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
