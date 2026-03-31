@@ -12,7 +12,7 @@ use image::RgbImage;
 use yas::ocr::ImageToText;
 
 use super::coord_scaler::CoordScaler;
-use super::mappings::{ConstBonus, MappingManager};
+use super::mappings::MappingManager;
 
 // ============================================================
 // FakeOcr — queue-based ImageToText mock
