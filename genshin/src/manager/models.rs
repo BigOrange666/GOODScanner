@@ -2,6 +2,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::scanner::common::models::GoodArtifact;
 
+/// Equip/unequip request: a list of equip instructions.
+/// Each pairs an artifact (GOOD v3 format) with a target location.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EquipRequest {
+    pub equip: Vec<EquipInstruction>,
+}
+
+/// A single equip instruction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EquipInstruction {
+    /// The artifact to equip/unequip, in GOOD v3 format.
+    pub artifact: GoodArtifact,
+    /// Target character key (e.g. "RaidenShogun"), or "" to unequip.
+    pub location: String,
+}
+
 /// Lock/unlock request: two lists of artifacts in GOOD v3 format.
 ///
 /// Each artifact represents the client's view of its **current state**.
@@ -40,12 +56,8 @@ pub struct ManageResult {
 /// 每条指令的执行结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstructionResult {
-    /// Matches ArtifactInstruction.id
     pub id: String,
     pub status: InstructionStatus,
-    /// Human-readable detail (bilingual).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -284,5 +296,58 @@ mod tests {
         assert_eq!(req.lock[0].substats.len(), 3);
         assert_eq!(req.lock[0].unactivated_substats.len(), 1);
         assert_eq!(req.lock[0].unactivated_substats[0].key, "def");
+    }
+
+    #[test]
+    fn test_equip_request_deser_equip_to_character() {
+        let json = r#"{
+            "equip": [{
+                "artifact": {
+                    "setKey": "GladiatorsFinale",
+                    "slotKey": "flower",
+                    "rarity": 5,
+                    "level": 20,
+                    "mainStatKey": "hp",
+                    "substats": [{"key": "critRate_", "value": 3.9}],
+                    "location": "Furina",
+                    "lock": true
+                },
+                "location": "RaidenShogun"
+            }]
+        }"#;
+        let req: EquipRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.equip.len(), 1);
+        assert_eq!(req.equip[0].artifact.set_key, "GladiatorsFinale");
+        assert_eq!(req.equip[0].location, "RaidenShogun");
+    }
+
+    #[test]
+    fn test_equip_request_deser_unequip() {
+        let json = r#"{
+            "equip": [{
+                "artifact": {
+                    "setKey": "WanderersTroupe",
+                    "slotKey": "plume",
+                    "rarity": 5,
+                    "level": 16,
+                    "mainStatKey": "atk",
+                    "substats": [{"key": "hp", "value": 508.0}],
+                    "location": "Furina",
+                    "lock": false
+                },
+                "location": ""
+            }]
+        }"#;
+        let req: EquipRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.equip.len(), 1);
+        assert_eq!(req.equip[0].location, "");
+        assert_eq!(req.equip[0].artifact.location, "Furina");
+    }
+
+    #[test]
+    fn test_equip_request_deser_empty_list() {
+        let json = r#"{"equip": []}"#;
+        let req: EquipRequest = serde_json::from_str(json).unwrap();
+        assert!(req.equip.is_empty());
     }
 }

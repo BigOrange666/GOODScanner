@@ -27,6 +27,12 @@ use crate::scanner::common::game_controller::GenshinGameController;
 use crate::manager::orchestrator::ProgressFn;
 use crate::scanner::common::models::GoodArtifact;
 
+/// Job types that can be submitted to the execution thread.
+enum JobRequest {
+    Manage(LockManageRequest),
+    Equip(EquipRequest),
+}
+
 /// Abstraction over game interaction for testability.
 pub trait ManageExecutor {
     fn execute(
@@ -35,6 +41,13 @@ pub trait ManageExecutor {
         progress_fn: Option<&ProgressFn>,
         cancel_token: yas::cancel::CancelToken,
     ) -> (ManageResult, Option<Vec<GoodArtifact>>);
+
+    fn execute_equip(
+        &mut self,
+        request: EquipRequest,
+        progress_fn: Option<&ProgressFn>,
+        cancel_token: yas::cancel::CancelToken,
+    ) -> ManageResult;
 }
 
 /// Real executor: wraps a game controller and artifact manager.
@@ -51,6 +64,15 @@ impl ManageExecutor for GameExecutor {
         cancel_token: yas::cancel::CancelToken,
     ) -> (ManageResult, Option<Vec<GoodArtifact>>) {
         self.manager.execute(&mut self.ctrl, request, progress_fn, cancel_token)
+    }
+
+    fn execute_equip(
+        &mut self,
+        request: EquipRequest,
+        progress_fn: Option<&ProgressFn>,
+        cancel_token: yas::cancel::CancelToken,
+    ) -> ManageResult {
+        self.manager.execute_equip(&mut self.ctrl, request, progress_fn, cancel_token)
     }
 }
 
@@ -207,7 +229,7 @@ where
         Arc::new(Mutex::new(ArtifactCache::Empty));
 
     // Channel for submitting jobs from HTTP thread to execution thread
-    let (job_tx, job_rx) = mpsc::channel::<(String, LockManageRequest)>();
+    let (job_tx, job_rx) = mpsc::channel::<(String, JobRequest)>();
 
     // Clone shared refs for the HTTP thread
     let http_state = job_state.clone();
@@ -271,6 +293,10 @@ where
                     handle_manage(request, &http_enabled, &http_state, &http_job_tx, cors_ref);
                 }
 
+                (Method::Post, "/equip") => {
+                    handle_equip(request, &http_enabled, &http_state, &http_job_tx, cors_ref);
+                }
+
                 // Lightweight poll — no result payload.
                 // Returns state + jobId + progress (running) or summary (completed).
                 (Method::Get, "/status") => {
@@ -280,35 +306,58 @@ where
                     respond_json(request, 200, &json, cors_ref);
                 }
 
-                // Full result — only available when completed.
-                // Returns the complete ManageResult with per-instruction outcomes.
-                (Method::Get, "/result") => {
-                    let state = http_state.lock().unwrap();
-                    match state.state {
-                        JobPhase::Completed => {
-                            if let Some(ref result) = state.result {
-                                let json = serde_json::to_string(result).unwrap_or_else(|_| {
-                                    format!(r#"{{"error":"{}"}}"#, yas::lang::localize("序列化失败 / Serialization failed"))
-                                });
-                                drop(state);
-                                respond_json(request, 200, &json, cors_ref);
-                            } else {
-                                drop(state);
-                                respond_json(request, 500,
-                                    &format!(r#"{{"error":"{}"}}"#, yas::lang::localize("结果丢失 / Result data missing")), cors_ref);
+                // Full result — requires jobId query param, idempotent.
+                (Method::Get, url) if url.starts_with("/result") => {
+                    // Parse jobId from query string: /result?jobId=xxx
+                    let query_job_id = url.split('?')
+                        .nth(1)
+                        .and_then(|qs| qs.split('&').find(|p| p.starts_with("jobId=")))
+                        .map(|p| &p[6..]);
+
+                    match query_job_id {
+                        None | Some("") => {
+                            respond_json(request, 400,
+                                r#"{"error":"missing required query parameter: jobId"}"#, cors_ref);
+                        }
+                        Some(requested_id) => {
+                            let state = http_state.lock().unwrap();
+                            match state.state {
+                                JobPhase::Completed => {
+                                    let actual_id = state.job_id.as_deref().unwrap_or("");
+                                    if actual_id != requested_id {
+                                        drop(state);
+                                        respond_json(request, 404,
+                                            r#"{"error":"job not found"}"#, cors_ref);
+                                    } else if let Some(ref result) = state.result {
+                                        let json = serde_json::to_string(result).unwrap_or_else(|_| {
+                                            r#"{"error":"serialization failed"}"#.to_string()
+                                        });
+                                        drop(state);
+                                        respond_json(request, 200, &json, cors_ref);
+                                    } else {
+                                        drop(state);
+                                        respond_json(request, 500,
+                                            r#"{"error":"result data missing"}"#, cors_ref);
+                                    }
+                                }
+                                JobPhase::Running => {
+                                    let actual_id = state.job_id.as_deref().unwrap_or("");
+                                    if actual_id != requested_id {
+                                        drop(state);
+                                        respond_json(request, 404,
+                                            r#"{"error":"job not found"}"#, cors_ref);
+                                    } else {
+                                        drop(state);
+                                        respond_json(request, 409,
+                                            r#"{"error":"job still running"}"#, cors_ref);
+                                    }
+                                }
+                                JobPhase::Idle => {
+                                    drop(state);
+                                    respond_json(request, 404,
+                                        r#"{"error":"job not found"}"#, cors_ref);
+                                }
                             }
-                        }
-                        JobPhase::Running => {
-                            drop(state);
-                            respond_json(request, 409,
-                                &format!(r#"{{"error":"{}"}}"#, yas::lang::localize("任务仍在执行 / Job still running. Poll GET /status.")),
-                                cors_ref);
-                        }
-                        JobPhase::Idle => {
-                            drop(state);
-                            respond_json(request, 404,
-                                &format!(r#"{{"error":"{}"}}"#, yas::lang::localize("没有已完成的任务 / No completed job available")),
-                                cors_ref);
                         }
                     }
                 }
@@ -396,14 +445,14 @@ where
                     Err(e) => {
                         error!("游戏初始化失败 / Game init failed: {}", e);
                         let mut state = job_state.lock().unwrap();
-                        let total_count = request.lock.len() + request.unlock.len();
+                        let total_count = match &request {
+                            JobRequest::Manage(r) => r.lock.len() + r.unlock.len(),
+                            JobRequest::Equip(r) => r.equip.len(),
+                        };
                         let err_results: Vec<_> = (0..total_count).map(|idx| {
                             crate::manager::models::InstructionResult {
                                 id: format!("item_{}", idx),
                                 status: crate::manager::models::InstructionStatus::UiError,
-                                detail: Some(format!(
-                                    "游戏初始化失败 / Game init failed: {}", e
-                                )),
                             }
                         }).collect();
                         let summary = crate::manager::models::ManageSummary::from_results(&err_results);
@@ -433,11 +482,19 @@ where
             }
         };
 
-        // Check before request is consumed — needed for cache invalidation below
-        let has_lock_instructions = !request.lock.is_empty() || !request.unlock.is_empty();
-
         let cancel_token = yas::cancel::CancelToken::new();
-        let (result, artifact_snapshot) = exec.execute(request, Some(&progress_fn), cancel_token);
+        let (result, artifact_snapshot, invalidates_cache) = match request {
+            JobRequest::Manage(manage_req) => {
+                let has_lock = !manage_req.lock.is_empty() || !manage_req.unlock.is_empty();
+                let (result, snapshot) = exec.execute(manage_req, Some(&progress_fn), cancel_token);
+                (result, snapshot, has_lock)
+            }
+            JobRequest::Equip(equip_req) => {
+                let result = exec.execute_equip(equip_req, Some(&progress_fn), cancel_token);
+                // Equip jobs always invalidate cache — in-game equipment state changed.
+                (result, None, true)
+            }
+        };
 
         // Update artifact cache based on scan completeness
         match artifact_snapshot {
@@ -447,15 +504,13 @@ where
                 info!("[job {}] 圣遗物快照已更新（{} 个）/ Artifact snapshot updated ({} items)", job_id, count, count);
             }
             None => {
-                // No snapshot returned — scan was incomplete (interrupted, early stop,
-                // stop_on_all_matched, or equip-only job with no scan phase).
-                // If this job had lock instructions, the in-game state has changed
-                // and any cached snapshot is now stale.
-                if has_lock_instructions {
+                // No snapshot returned — scan was incomplete, equip-only, or interrupted.
+                // If this job modified in-game state, any cached snapshot is now stale.
+                if invalidates_cache {
                     let mut cache = artifact_cache.lock().unwrap();
                     if matches!(*cache, ArtifactCache::Complete(_)) {
                         *cache = ArtifactCache::Incomplete;
-                        info!("[job {}] 锁操作已执行但扫描未完成，快照已失效 / Lock changes applied but scan incomplete, artifact snapshot invalidated", job_id);
+                        info!("[job {}] 游戏内状态已变更，快照已失效 / In-game state changed, artifact snapshot invalidated", job_id);
                     }
                 }
             }
@@ -474,12 +529,32 @@ where
     Ok(())
 }
 
+/// Validate a single artifact entry. Returns `Some(message)` on failure.
+fn validate_artifact(artifact: &crate::scanner::common::models::GoodArtifact) -> Option<String> {
+    if artifact.set_key.trim().is_empty() {
+        return Some("empty setKey".to_string());
+    }
+    if artifact.slot_key.trim().is_empty() {
+        return Some("empty slotKey".to_string());
+    }
+    if artifact.main_stat_key.trim().is_empty() {
+        return Some("empty mainStatKey".to_string());
+    }
+    if artifact.rarity < 4 || artifact.rarity > 5 {
+        return Some(format!("invalid rarity: {} (must be 4-5)", artifact.rarity));
+    }
+    if artifact.level < 0 || artifact.level > 20 {
+        return Some(format!("invalid level: {} (must be 0-20)", artifact.level));
+    }
+    None
+}
+
 /// Handle POST /manage: validate origin, check busy, enforce size limit, submit job.
 fn handle_manage(
     mut request: tiny_http::Request,
     enabled: &AtomicBool,
     state: &Arc<Mutex<JobState>>,
-    job_tx: &mpsc::Sender<(String, LockManageRequest)>,
+    job_tx: &mpsc::Sender<(String, JobRequest)>,
     cors_origin: Option<&str>,
 ) {
     // Check if manager is enabled
@@ -574,6 +649,21 @@ fn handle_manage(
         return;
     }
 
+    // Validate ALL entries upfront — reject the whole request on any invalid entry.
+    for (list_name, artifacts) in [("lock", &manage_request.lock), ("unlock", &manage_request.unlock)] {
+        for (idx, artifact) in artifacts.iter().enumerate() {
+            if let Some(err) = validate_artifact(artifact) {
+                respond_json(
+                    request,
+                    400,
+                    &format!(r#"{{"error":"{}[{}]: {}"}}"#, list_name, idx, err),
+                    cors_origin,
+                );
+                return;
+            }
+        }
+    }
+
     let total = manage_request.lock.len() + manage_request.unlock.len();
     let job_id = uuid::Uuid::new_v4().to_string();
 
@@ -590,7 +680,7 @@ fn handle_manage(
     }
 
     // Send to execution thread
-    if job_tx.send((job_id.clone(), manage_request)).is_err() {
+    if job_tx.send((job_id.clone(), JobRequest::Manage(manage_request))).is_err() {
         let mut s = state.lock().unwrap();
         *s = JobState::idle();
         respond_json(
@@ -603,6 +693,142 @@ fn handle_manage(
     }
 
     // Return 202 Accepted immediately
+    let json = format!(r#"{{"jobId":"{}","total":{}}}"#, job_id, total);
+    respond_json(request, 202, &json, cors_origin);
+}
+
+/// Handle POST /equip: validate, parse EquipRequest, submit job.
+fn handle_equip(
+    mut request: tiny_http::Request,
+    enabled: &AtomicBool,
+    state: &Arc<Mutex<JobState>>,
+    job_tx: &mpsc::Sender<(String, JobRequest)>,
+    cors_origin: Option<&str>,
+) {
+    if !enabled.load(Ordering::Relaxed) {
+        warn!("管理器已暂停，拒绝请求 / Manager paused, rejecting request");
+        respond_json(
+            request,
+            503,
+            &format!(r#"{{"error":"{}"}}"#, yas::lang::localize("管理器已暂停 / Manager is paused. Enable it in the GUI to accept requests.")),
+            cors_origin,
+        );
+        return;
+    }
+
+    {
+        let s = state.lock().unwrap();
+        if s.state == JobPhase::Running {
+            respond_json(
+                request,
+                409,
+                &format!(r#"{{"error":"{}"}}"#, yas::lang::localize("正在执行其他任务 / Another job is already running. Poll GET /status for progress.")),
+                cors_origin,
+            );
+            return;
+        }
+    }
+
+    if let Some(len) = request.body_length() {
+        if len > MAX_BODY_SIZE {
+            respond_json(
+                request,
+                413,
+                &format!(r#"{{"error":"{}"}}"#, yas::lang::localize(&format!(
+                    "请求体过大（{} 字节，上限 {} 字节）/ Request body too large: {} bytes (max {})",
+                    len, MAX_BODY_SIZE, len, MAX_BODY_SIZE
+                ))),
+                cors_origin,
+            );
+            return;
+        }
+    }
+
+    let mut body = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+        respond_json(
+            request,
+            400,
+            &format!(r#"{{"error":"{}"}}"#, yas::lang::localize(&format!("读取请求体失败: {} / Failed to read body: {}", e, e))),
+            cors_origin,
+        );
+        return;
+    }
+
+    if body.len() > MAX_BODY_SIZE {
+        respond_json(
+            request,
+            413,
+            &format!(r#"{{"error":"{}"}}"#, yas::lang::localize(&format!(
+                "请求体过大（{} 字节，上限 {} 字节）/ Request body too large: {} bytes (max {})",
+                body.len(), MAX_BODY_SIZE, body.len(), MAX_BODY_SIZE
+            ))),
+            cors_origin,
+        );
+        return;
+    }
+
+    let equip_request: EquipRequest = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(
+                request,
+                400,
+                &format!(r#"{{"error":"{}"}}"#, yas::lang::localize(&format!("JSON解析失败: {} / JSON parse error: {}", e, e))),
+                cors_origin,
+            );
+            return;
+        }
+    };
+
+    if equip_request.equip.is_empty() {
+        respond_json(
+            request,
+            400,
+            &format!(r#"{{"error":"{}"}}"#, yas::lang::localize("equip 列表为空 / Equip list is empty")),
+            cors_origin,
+        );
+        return;
+    }
+
+    // Validate all artifact entries
+    for (idx, instr) in equip_request.equip.iter().enumerate() {
+        if let Some(err) = validate_artifact(&instr.artifact) {
+            respond_json(
+                request,
+                400,
+                &format!(r#"{{"error":"equip[{}]: {}"}}"#, idx, err),
+                cors_origin,
+            );
+            return;
+        }
+    }
+
+    let total = equip_request.equip.len();
+    let job_id = uuid::Uuid::new_v4().to_string();
+
+    info!(
+        "[job {}] 收到 {} 条装备请求 / Received {} equip instructions",
+        job_id, total, total
+    );
+
+    {
+        let mut s = state.lock().unwrap();
+        *s = JobState::running(job_id.clone(), total);
+    }
+
+    if job_tx.send((job_id.clone(), JobRequest::Equip(equip_request))).is_err() {
+        let mut s = state.lock().unwrap();
+        *s = JobState::idle();
+        respond_json(
+            request,
+            500,
+            &format!(r#"{{"error":"{}"}}"#, yas::lang::localize("执行线程不可用 / Execution thread unavailable")),
+            cors_origin,
+        );
+        return;
+    }
+
     let json = format!(r#"{{"jobId":"{}","total":{}}}"#, job_id, total);
     respond_json(request, 202, &json, cors_origin);
 }
@@ -637,6 +863,17 @@ mod tests {
                 .pop_front()
                 .expect("FakeExecutor: no more responses queued")
         }
+
+        fn execute_equip(
+            &mut self,
+            _request: EquipRequest,
+            _progress_fn: Option<&ProgressFn>,
+            _cancel_token: yas::cancel::CancelToken,
+        ) -> ManageResult {
+            let results = Vec::new();
+            let summary = ManageSummary::from_results(&results);
+            ManageResult { results, summary }
+        }
     }
 
     fn make_result(statuses: &[(&str, InstructionStatus)]) -> ManageResult {
@@ -645,7 +882,6 @@ mod tests {
             .map(|(id, status)| InstructionResult {
                 id: id.to_string(),
                 status: status.clone(),
-                detail: None,
             })
             .collect();
         let summary = ManageSummary::from_results(&results);
@@ -1052,13 +1288,28 @@ mod tests {
     }
 
     #[test]
-    fn test_result_returns_404_when_idle() {
+    fn test_result_returns_400_without_job_id() {
         let responses = VecDeque::new();
         let (port, shutdown, handle) = start_test_server(responses, 0);
         let client = reqwest::blocking::Client::new();
 
         let resp = client
             .get(format!("http://127.0.0.1:{}/result", port))
+            .send()
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+
+        stop_server(&shutdown, handle);
+    }
+
+    #[test]
+    fn test_result_returns_404_for_unknown_job_id() {
+        let responses = VecDeque::new();
+        let (port, shutdown, handle) = start_test_server(responses, 0);
+        let client = reqwest::blocking::Client::new();
+
+        let resp = client
+            .get(format!("http://127.0.0.1:{}/result?jobId=nonexistent", port))
             .send()
             .unwrap();
         assert_eq!(resp.status().as_u16(), 404);
@@ -1076,17 +1327,19 @@ mod tests {
         let (port, shutdown, handle) = start_test_server(responses, 5000);
         let client = reqwest::blocking::Client::new();
 
-        client
+        let resp = client
             .post(format!("http://127.0.0.1:{}/manage", port))
             .header("Content-Type", "application/json")
             .body(make_manage_body(&["a"]))
             .send()
             .unwrap();
+        let body: serde_json::Value = resp.json().unwrap();
+        let job_id = body["jobId"].as_str().unwrap();
 
         std::thread::sleep(Duration::from_millis(500));
 
         let resp = client
-            .get(format!("http://127.0.0.1:{}/result", port))
+            .get(format!("http://127.0.0.1:{}/result?jobId={}", port, job_id))
             .send()
             .unwrap();
         assert_eq!(resp.status().as_u16(), 409);
@@ -1117,6 +1370,8 @@ mod tests {
             .send()
             .unwrap();
         assert_eq!(resp.status().as_u16(), 202);
+        let submit_body: serde_json::Value = resp.json().unwrap();
+        let job_id = submit_body["jobId"].as_str().unwrap().to_string();
 
         // Poll until completed
         poll_until_completed(port);
@@ -1130,8 +1385,8 @@ mod tests {
         assert_eq!(body["summary"]["not_found"], 1);
         assert_eq!(body["summary"]["already_correct"], 1);
 
-        // Get full result
-        let resp = client.get(format!("{}/result", base)).send().unwrap();
+        // Get full result (with jobId)
+        let resp = client.get(format!("{}/result?jobId={}", base, job_id)).send().unwrap();
         assert_eq!(resp.status().as_u16(), 200);
         let body: serde_json::Value = resp.json().unwrap();
         assert_eq!(body["results"][0]["id"], "i1");
@@ -1140,6 +1395,10 @@ mod tests {
         assert_eq!(body["results"][1]["status"], "not_found");
         assert_eq!(body["results"][2]["id"], "i3");
         assert_eq!(body["results"][2]["status"], "already_correct");
+
+        // Result is idempotent — second call returns same data
+        let resp = client.get(format!("{}/result?jobId={}", base, job_id)).send().unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
 
         stop_server(&shutdown, handle);
     }
@@ -1340,16 +1599,18 @@ mod tests {
         }
 
         // Submit job
-        client
+        let resp = client
             .post(format!("{}/manage", base))
             .header("Content-Type", "application/json")
             .body(make_manage_body(&["x", "y"]))
             .send()
             .unwrap();
+        let submit_body: serde_json::Value = resp.json().unwrap();
+        let job_id = submit_body["jobId"].as_str().unwrap().to_string();
         poll_until_completed(port);
 
         // Check result
-        let resp = client.get(format!("{}/result", base)).send().unwrap();
+        let resp = client.get(format!("{}/result?jobId={}", base, job_id)).send().unwrap();
         assert_eq!(resp.status().as_u16(), 200);
         let body: serde_json::Value = resp.json().unwrap();
         let results = body["results"].as_array().unwrap();
@@ -1393,32 +1654,38 @@ mod tests {
         let base = format!("http://127.0.0.1:{}", port);
 
         // Job 1
-        client
+        let resp = client
             .post(format!("{}/manage", base))
             .header("Content-Type", "application/json")
             .body(make_manage_body(&["j1"]))
             .send()
             .unwrap();
+        let job1_id = resp.json::<serde_json::Value>().unwrap()["jobId"].as_str().unwrap().to_string();
         poll_until_completed(port);
 
-        let resp = client.get(format!("{}/result", base)).send().unwrap();
+        let resp = client.get(format!("{}/result?jobId={}", base, job1_id)).send().unwrap();
         let body: serde_json::Value = resp.json().unwrap();
         assert_eq!(body["results"][0]["id"], "j1");
         assert_eq!(body["results"][0]["status"], "success");
 
         // Job 2
-        client
+        let resp = client
             .post(format!("{}/manage", base))
             .header("Content-Type", "application/json")
             .body(make_manage_body(&["j2"]))
             .send()
             .unwrap();
+        let job2_id = resp.json::<serde_json::Value>().unwrap()["jobId"].as_str().unwrap().to_string();
         poll_until_completed(port);
 
-        let resp = client.get(format!("{}/result", base)).send().unwrap();
+        let resp = client.get(format!("{}/result?jobId={}", base, job2_id)).send().unwrap();
         let body: serde_json::Value = resp.json().unwrap();
         assert_eq!(body["results"][0]["id"], "j2");
         assert_eq!(body["results"][0]["status"], "not_found");
+
+        // Job 1's result is gone — replaced by job 2
+        let resp = client.get(format!("{}/result?jobId={}", base, job1_id)).send().unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
 
         stop_server(&shutdown, handle);
     }
