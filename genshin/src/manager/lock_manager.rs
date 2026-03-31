@@ -230,7 +230,7 @@ impl LockManager {
                 };
 
                 for col in 0..row_cols {
-                    if yas::utils::is_rmb_down() || scanned_count >= total {
+                    if ctrl.check_rmb() || scanned_count >= total {
                         break 'outer;
                     }
 
@@ -355,11 +355,11 @@ impl LockManager {
 
             // Step 4: Apply lock toggles for this page (before scrolling)
             for toggle in &page_toggles {
-                if yas::utils::is_rmb_down() {
+                if ctrl.check_rmb() {
                     results.insert(toggle.instr_id.clone(), InstructionResult {
                         id: toggle.instr_id.clone(),
                         status: InstructionStatus::Aborted,
-                        detail: Some("用户中断 / User aborted".to_string()),
+                        detail: Some(format!("{}", ctrl.cancel_token().reason().unwrap())),
                     });
                     continue;
                 }
@@ -456,7 +456,7 @@ impl LockManager {
             }
 
             for i in 0..ticks {
-                if yas::utils::is_rmb_down() {
+                if ctrl.check_rmb() {
                     break 'outer;
                 }
                 ctrl.mouse_scroll(1);
@@ -468,21 +468,21 @@ impl LockManager {
         }
 
         // Scan is complete only if we visited every item without interruption
-        let scan_complete = scanned_count >= total && !yas::utils::is_rmb_down() && !yas::utils::was_aborted();
+        let scan_complete = scanned_count >= total && !ctrl.is_cancelled();
 
         // Mark unmatched instructions
-        let was_aborted = yas::utils::was_aborted() || yas::utils::is_rmb_down();
+        let was_cancelled = ctrl.is_cancelled();
         for instr in instructions {
             if instr.changes.lock.is_some() && !results.contains_key(&instr.id) {
                 results.insert(instr.id.clone(), InstructionResult {
                     id: instr.id.clone(),
-                    status: if was_aborted {
+                    status: if was_cancelled {
                         InstructionStatus::Aborted
                     } else {
                         InstructionStatus::NotFound
                     },
-                    detail: Some(if was_aborted {
-                        "用户中断 / User aborted".to_string()
+                    detail: Some(if was_cancelled {
+                        format!("{}", ctrl.cancel_token().reason().unwrap_or(yas::cancel::StopReason::UserAbort))
                     } else {
                         "背包中未找到匹配圣遗物 / Matching artifact not found in inventory".to_string()
                     }),

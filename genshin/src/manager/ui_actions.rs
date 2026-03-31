@@ -203,8 +203,8 @@ pub fn open_character_screen(
     let mut first_name: Option<String> = None;
 
     for i in 0..max_chars {
-        if yas::utils::is_rmb_down() {
-            bail!("用户中断 / User aborted");
+        if ctrl.check_rmb() {
+            bail!("{}", ctrl.cancel_token().reason().unwrap());
         }
 
         // OCR character name
@@ -500,8 +500,8 @@ pub fn find_and_click_artifact_in_selection(
     for page in 0..max_pages {
         for row in 0..SEL_ROWS {
             for col in 0..SEL_COLS {
-                if yas::utils::is_rmb_down() {
-                    bail!("用户中断 / User aborted");
+                if ctrl.check_rmb() {
+                    bail!("{}", ctrl.cancel_token().reason().unwrap());
                 }
 
                 let x = SEL_FIRST_X + col as f64 * SEL_OFFSET_X;

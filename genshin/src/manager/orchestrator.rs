@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use log::{info, warn};
 
+use yas::cancel::CancelToken;
+
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::GoodArtifact;
@@ -106,6 +108,9 @@ impl ArtifactManager {
         // Focus the game window before any UI interactions
         ctrl.focus_game_window();
 
+        let token = CancelToken::new();
+        ctrl.set_cancel_token(token.clone());
+
         // Partition instructions
         let has_lock_changes: Vec<&ArtifactInstruction> = request.instructions.iter()
             .filter(|i| i.changes.lock.is_some())
@@ -140,7 +145,7 @@ impl ArtifactManager {
             .cloned()
             .collect();
 
-        if !lock_instructions.is_empty() && !yas::utils::was_aborted() {
+        if !lock_instructions.is_empty() && !token.is_cancelled() {
             report(0, "", "阶段一：锁定变更 / Phase 1: Lock changes");
 
             let lock_mgr = LockManager::new(
@@ -166,7 +171,7 @@ impl ArtifactManager {
             }
 
             // Return to main UI between phases
-            if !yas::utils::was_aborted() {
+            if !token.is_cancelled() {
                 ctrl.return_to_main_ui(4);
             }
         }
@@ -177,7 +182,7 @@ impl ArtifactManager {
             .cloned()
             .collect();
 
-        if !equip_instructions.is_empty() && !yas::utils::was_aborted() {
+        if !equip_instructions.is_empty() && !token.is_cancelled() {
             report(all_results.len(), "", "阶段二：装备变更 / Phase 2: Equip changes");
 
             let equip_mgr = EquipManager::new(
@@ -201,18 +206,19 @@ impl ArtifactManager {
             .map(|r| r.id.clone())
             .collect();
 
-        let was_aborted = yas::utils::was_aborted();
+        let was_cancelled = token.is_cancelled();
+        let cancel_reason = token.reason();
         for instr in &request.instructions {
             if !processed_ids.contains(&instr.id) {
                 all_results.push(InstructionResult {
                     id: instr.id.clone(),
-                    status: if was_aborted {
+                    status: if was_cancelled {
                         InstructionStatus::Aborted
                     } else {
                         InstructionStatus::Skipped
                     },
-                    detail: Some(if was_aborted {
-                        "用户中断 / User aborted".to_string()
+                    detail: Some(if let Some(reason) = cancel_reason {
+                        format!("{}", reason)
                     } else {
                         "未处理 / Not processed".to_string()
                     }),

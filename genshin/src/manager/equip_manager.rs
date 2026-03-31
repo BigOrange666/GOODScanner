@@ -78,11 +78,11 @@ impl EquipManager {
                 unequip_instrs.len(), unequip_instrs.len());
 
             for instr in &unequip_instrs {
-                if yas::utils::is_rmb_down() {
+                if ctrl.check_rmb() {
                     results.push(InstructionResult {
                         id: instr.id.clone(),
                         status: InstructionStatus::Aborted,
-                        detail: Some("用户中断 / User aborted".to_string()),
+                        detail: Some(format!("{}", ctrl.cancel_token().reason().unwrap())),
                     });
                     continue;
                 }
@@ -123,12 +123,12 @@ impl EquipManager {
 
         // Process equip groups (one character at a time)
         for (char_key, char_instrs) in &by_character {
-            if yas::utils::is_rmb_down() {
+            if ctrl.check_rmb() {
                 for instr in char_instrs {
                     results.push(InstructionResult {
                         id: instr.id.clone(),
                         status: InstructionStatus::Aborted,
-                        detail: Some("用户中断 / User aborted".to_string()),
+                        detail: Some(format!("{}", ctrl.cancel_token().reason().unwrap())),
                     });
                 }
                 continue;
