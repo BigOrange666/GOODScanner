@@ -203,7 +203,7 @@ impl<'a> BackpackScanner<'a> {
 
         // Send scroll ticks with small delays to avoid overwhelming the game
         for i in 0..ticks {
-            if utils::is_rmb_down() {
+            if self.ctrl.check_rmb() {
                 return false;
             }
             self.ctrl.mouse_scroll(1);
@@ -283,7 +283,7 @@ impl<'a> BackpackScanner<'a> {
                 };
 
                 for col in 0..row_item_count {
-                    if utils::is_rmb_down() || scanned_count >= total {
+                    if self.ctrl.check_rmb() || scanned_count >= total {
                         break 'outer;
                     }
 

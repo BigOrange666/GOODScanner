@@ -5,6 +5,7 @@ use anyhow::{anyhow, Result};
 use image::RgbImage;
 use log::debug;
 
+use yas::cancel::CancelToken;
 use yas::capture::{Capturer, GenericCapturer};
 use yas::game_info::GameInfo;
 use yas::ocr::ImageToText;
@@ -30,6 +31,9 @@ pub struct GenshinGameController {
 
     /// Running pixel pool value for panel-load detection.
     pool: f64,
+
+    /// Per-run cancellation token.
+    cancel: CancelToken,
 }
 
 /// Compute pixel pool: sum of red channel values.
@@ -62,7 +66,31 @@ impl GenshinGameController {
             capturer: Rc::new(GenericCapturer::new()?),
             system_control: SystemControl::new(),
             pool: 0.0,
+            cancel: CancelToken::new(),
         })
+    }
+}
+
+// Cancellation methods.
+impl GenshinGameController {
+    /// Set the cancellation token for this run.
+    pub fn set_cancel_token(&mut self, token: CancelToken) {
+        self.cancel = token;
+    }
+
+    /// Get a clone of the current cancellation token.
+    pub fn cancel_token(&self) -> CancelToken {
+        self.cancel.clone()
+    }
+
+    /// Check if the current run has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// Check RMB and cancel if pressed. Returns true if cancelled.
+    pub fn check_rmb(&self) -> bool {
+        self.cancel.check_rmb()
     }
 }
 

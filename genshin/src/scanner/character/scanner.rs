@@ -956,7 +956,7 @@ impl GoodCharacterScanner {
         pb.set_message("0 characters scanned");
 
         loop {
-            if utils::is_rmb_down() {
+            if ctrl.check_rmb() {
                 info!("[character] 用户中断扫描 / [character] user interrupted scan");
                 break;
             }
@@ -1046,7 +1046,7 @@ impl GoodCharacterScanner {
             })
             .collect();
 
-        if !suspicious_indices.is_empty() && !utils::was_aborted() {
+        if !suspicious_indices.is_empty() && !ctrl.is_cancelled() {
             info!(
                 "[character] 第二轮: 重新扫描{}个疑似异常角色 / [character] second pass: rescanning {} suspicious characters",
                 suspicious_indices.len(), suspicious_indices.len()
@@ -1176,7 +1176,7 @@ impl GoodCharacterScanner {
         let mut current_index: usize = 0;
 
         for &target_idx in suspicious_indices {
-            if utils::is_rmb_down() {
+            if ctrl.check_rmb() {
                 info!("[character] 第二轮: 用户中断 / [character] second pass: user interrupted");
                 break;
             }
