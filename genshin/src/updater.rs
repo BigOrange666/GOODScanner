@@ -24,8 +24,8 @@ const ASSET_NAME: &str = "GOODScanner.exe";
 
 /// Download mirror prefixes, tried in order.  Empty string = direct GitHub.
 const DOWNLOAD_MIRRORS: &[&str] = &[
-    "https://ghfast.top/",
     "https://gh-proxy.com/",
+    "https://ghfast.top/",
     "", // direct GitHub
 ];
 

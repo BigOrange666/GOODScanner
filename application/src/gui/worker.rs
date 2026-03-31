@@ -127,7 +127,7 @@ pub fn spawn_server(state: &AppState) -> TaskHandle {
     let user_config = state.user_config.clone();
     let port = state.server_port;
     let enabled = state.server_enabled.clone();
-    let stop_on_all_matched = state.stop_on_all_matched;
+    let stop_on_all_matched = !state.update_inventory;
     let lang = state.lang;
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();

@@ -309,7 +309,7 @@ impl<'a> BackpackScanner<'a> {
                     // brightness is ambiguous (mid-animation), sleep a full
                     // delay period and re-capture.
                     let first_delay = _config.delay_after_panel / 2;
-                    let retry_delay = _config.delay_after_panel;
+                    let retry_delay = _config.delay_after_panel - first_delay;
 
                     if first_delay > 0 {
                         utils::sleep(first_delay as u32);

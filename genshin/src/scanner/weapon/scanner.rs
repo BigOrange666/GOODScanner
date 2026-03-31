@@ -172,8 +172,7 @@ impl GoodWeaponScanner {
                 }
             }
 
-            if pixel_utils::detect_weapon_rarity(image, scaler) <= 2 {
-                info!("[weapon] 检测到低星级物品，停止扫描 / [weapon] detected low-star item, stopping");
+            if pixel_utils::weapon_below_min_rarity(image, scaler, config.min_rarity) {
                 return Ok(WeaponScanResult::Stop);
             }
 
@@ -514,9 +513,7 @@ impl GoodWeaponScanner {
                         }
 
                         // Quick rarity check on main thread
-                        let rarity = pixel_utils::detect_weapon_rarity(&image, &scaler);
-                        if rarity <= 2 {
-                            debug!("[weapon] 检测到{}星物品，停止捕获 / [weapon] detected {}* item, stopping capture", rarity, rarity);
+                        if pixel_utils::weapon_below_min_rarity(&image, &scaler, self.config.min_rarity) {
                             return ScanAction::Stop;
                         }
 

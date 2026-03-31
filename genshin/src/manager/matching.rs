@@ -1,45 +1,42 @@
-use std::collections::HashSet;
-
 use crate::scanner::common::models::{GoodArtifact, GoodSubStat};
 
-/// Score substat list matching: keys (order-independent) + values for disambiguation.
-fn score_substats(scanned: &[GoodSubStat], target: &[GoodSubStat]) -> f64 {
-    if scanned.is_empty() && target.is_empty() {
-        return 0.0;
+/// Value tolerance for substat matching (accounts for OCR rounding).
+/// Slightly above 0.1 to handle f64 representation (e.g., 4.0 - 3.9 = 0.10000000000000053).
+const VALUE_TOLERANCE: f64 = 0.100001;
+
+/// Hard-match substat lists: same keys (order-independent) and each value within tolerance.
+/// Returns `false` if key sets differ or any value differs by more than `VALUE_TOLERANCE`.
+fn substats_match(scanned: &[GoodSubStat], target: &[GoodSubStat]) -> bool {
+    if scanned.len() != target.len() {
+        return false;
     }
-
-    let scanned_keys: HashSet<&str> = scanned.iter().map(|s| s.key.as_str()).collect();
-    let target_keys: HashSet<&str> = target.iter().map(|s| s.key.as_str()).collect();
-
-    if scanned_keys == target_keys {
-        let mut score = 20.0;
-        for ts in target {
-            if let Some(ss) = scanned.iter().find(|s| s.key == ts.key) {
-                let diff = (ss.value - ts.value).abs();
-                let tolerance = if ts.key.ends_with('_') { 0.2 } else { 1.5 };
-                if diff <= tolerance {
-                    score += 5.0;
+    if scanned.is_empty() {
+        return true;
+    }
+    for ts in target {
+        match scanned.iter().find(|s| s.key == ts.key) {
+            Some(ss) => {
+                if (ss.value - ts.value).abs() > VALUE_TOLERANCE {
+                    return false;
                 }
             }
+            None => return false,
         }
-        score
-    } else {
-        let overlap = scanned_keys.intersection(&target_keys).count();
-        overlap as f64 * 3.0
     }
+    true
 }
 
 /// Match a scanned `GoodArtifact` against a target `GoodArtifact`.
 ///
-/// Returns `None` if hard fields (set, slot, rarity, level, main stat) don't match.
-/// Returns `Some(score)` where higher score means better match.
-/// Substats (including unactivated) are used for disambiguation when multiple artifacts
-/// share the same hard fields.
+/// ALL fields are hard-match: set, slot, rarity, level, main stat, substats,
+/// and unactivated substats. Returns `None` if any field doesn't match.
+/// Substat values allow 0.1 tolerance for OCR rounding.
+///
+/// When a match passes, returns `Some(1.0)` — all matches are equally confident.
 ///
 /// 将扫描到的 `GoodArtifact` 与目标 `GoodArtifact` 进行匹配。
-/// 如果硬性字段不匹配则返回 None，否则返回匹配分数（越高越好）。
+/// 所有字段均为硬匹配，副词条值允许 0.1 误差。不匹配则返回 None。
 pub fn match_score(scanned: &GoodArtifact, target: &GoodArtifact) -> Option<f64> {
-    // Hard-reject on any mismatch in highly reliable fields
     if scanned.rarity != target.rarity {
         return None;
     }
@@ -55,12 +52,16 @@ pub fn match_score(scanned: &GoodArtifact, target: &GoodArtifact) -> Option<f64>
     if scanned.main_stat_key != target.main_stat_key {
         return None;
     }
-
-    // Base score for matching all hard fields
-    let mut score: f64 = 50.0;
-    score += score_substats(&scanned.substats, &target.substats);
-    score += score_substats(&scanned.unactivated_substats, &target.unactivated_substats);
-    Some(score)
+    if !substats_match(&scanned.substats, &target.substats) {
+        return None;
+    }
+    if !substats_match(&scanned.unactivated_substats, &target.unactivated_substats) {
+        return None;
+    }
+    if scanned.elixir_crafted != target.elixir_crafted {
+        return None;
+    }
+    Some(1.0)
 }
 
 /// Find the best matching instruction index for a scanned artifact.
@@ -127,9 +128,7 @@ mod tests {
             &[("critRate_", 3.9), ("critDMG_", 7.8), ("atk_", 5.8), ("def", 23.0)]);
         let target = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
             &[("critRate_", 3.9), ("critDMG_", 7.8), ("atk_", 5.8), ("def", 23.0)]);
-        let score = match_score(&scanned, &target);
-        assert!(score.is_some());
-        assert!(score.unwrap() > 80.0);
+        assert!(match_score(&scanned, &target).is_some());
     }
 
     #[test]
@@ -141,69 +140,96 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_substat_match() {
+    fn test_substat_key_mismatch_rejects() {
         let scanned = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
             &[("critRate_", 3.9), ("critDMG_", 7.8), ("atk_", 5.8), ("def", 23.0)]);
         let target = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
             &[("critRate_", 3.9), ("critDMG_", 7.8), ("atk_", 5.8), ("hp_", 4.7)]);
-        let score = match_score(&scanned, &target);
-        assert!(score.is_some());
-        assert!(score.unwrap() < 70.0);
+        assert!(match_score(&scanned, &target).is_none(), "Different substat keys must reject");
     }
 
     #[test]
-    fn test_disambiguation_by_value() {
-        let art1 = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
+    fn test_substat_value_outside_tolerance_rejects() {
+        let scanned = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
             &[("critRate_", 3.9), ("critDMG_", 7.8)]);
-        let art2 = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
-            &[("critRate_", 10.5), ("critDMG_", 15.6)]);
         let target = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
             &[("critRate_", 10.5), ("critDMG_", 15.6)]);
-        let score1 = match_score(&art1, &target).unwrap();
-        let score2 = match_score(&art2, &target).unwrap();
-        assert!(score2 > score1, "Closer values should score higher");
+        assert!(match_score(&scanned, &target).is_none(), "Values outside 0.1 tolerance must reject");
     }
 
     #[test]
-    fn test_unactivated_substats_matching() {
+    fn test_substat_value_within_tolerance_matches() {
+        let scanned = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
+            &[("critRate_", 3.9), ("critDMG_", 7.85)]);
+        let target = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
+            &[("critRate_", 3.9), ("critDMG_", 7.8)]);
+        assert!(match_score(&scanned, &target).is_some(), "Values within 0.1 tolerance must match");
+    }
+
+    #[test]
+    fn test_substat_value_at_tolerance_boundary() {
+        // Exactly 0.1 diff should pass
+        let scanned = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
+            &[("critRate_", 4.0)]);
+        let target = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
+            &[("critRate_", 3.9)]);
+        assert!(match_score(&scanned, &target).is_some(), "Exactly 0.1 diff must match");
+
+        // 0.11 diff should reject
+        let scanned2 = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
+            &[("critRate_", 4.01)]);
+        assert!(match_score(&scanned2, &target).is_none(), "0.11 diff must reject");
+    }
+
+    #[test]
+    fn test_substat_count_mismatch_rejects() {
+        let scanned = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
+            &[("critRate_", 3.9), ("critDMG_", 7.8), ("atk_", 5.8)]);
+        let target = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
+            &[("critRate_", 3.9), ("critDMG_", 7.8)]);
+        assert!(match_score(&scanned, &target).is_none(), "Different substat count must reject");
+    }
+
+    #[test]
+    fn test_unactivated_substats_hard_match() {
         let scanned = make_artifact_with_unactivated(
             "GladiatorsFinale", "flower", 5, 0, "hp",
             &[("critRate_", 3.9), ("critDMG_", 7.8), ("atk_", 5.8)],
             &[("def", 23.0)],
         );
-        let target_with = make_artifact_with_unactivated(
+        let target_match = make_artifact_with_unactivated(
             "GladiatorsFinale", "flower", 5, 0, "hp",
             &[("critRate_", 3.9), ("critDMG_", 7.8), ("atk_", 5.8)],
             &[("def", 23.0)],
         );
-        let target_without = make_artifact(
-            "GladiatorsFinale", "flower", 5, 0, "hp",
-            &[("critRate_", 3.9), ("critDMG_", 7.8), ("atk_", 5.8)],
-        );
-        let score_with = match_score(&scanned, &target_with).unwrap();
-        let score_without = match_score(&scanned, &target_without).unwrap();
-        assert!(score_with > score_without, "Matching unactivated substats should score higher");
-    }
-
-    #[test]
-    fn test_unactivated_substat_disambiguation() {
-        let art1 = make_artifact_with_unactivated(
-            "GladiatorsFinale", "flower", 5, 0, "hp",
-            &[("critRate_", 3.9), ("critDMG_", 7.8), ("atk_", 5.8)],
-            &[("def", 23.0)],
-        );
-        let art2 = make_artifact_with_unactivated(
+        let target_wrong_key = make_artifact_with_unactivated(
             "GladiatorsFinale", "flower", 5, 0, "hp",
             &[("critRate_", 3.9), ("critDMG_", 7.8), ("atk_", 5.8)],
             &[("hp_", 4.7)],
         );
-        let target = make_artifact_with_unactivated(
+        let target_no_unact = make_artifact(
             "GladiatorsFinale", "flower", 5, 0, "hp",
             &[("critRate_", 3.9), ("critDMG_", 7.8), ("atk_", 5.8)],
-            &[("def", 23.0)],
         );
-        let score1 = match_score(&art1, &target).unwrap();
-        let score2 = match_score(&art2, &target).unwrap();
-        assert!(score1 > score2, "Matching unactivated substat should win disambiguation");
+        assert!(match_score(&scanned, &target_match).is_some());
+        assert!(match_score(&scanned, &target_wrong_key).is_none(), "Wrong unactivated key must reject");
+        assert!(match_score(&scanned, &target_no_unact).is_none(), "Missing unactivated must reject");
+    }
+
+    #[test]
+    fn test_elixir_crafted_hard_match() {
+        let mut scanned = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
+            &[("critRate_", 3.9), ("critDMG_", 7.8)]);
+        scanned.elixir_crafted = true;
+
+        let mut target_elixir = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
+            &[("critRate_", 3.9), ("critDMG_", 7.8)]);
+        target_elixir.elixir_crafted = true;
+
+        let target_normal = make_artifact("GladiatorsFinale", "flower", 5, 20, "hp",
+            &[("critRate_", 3.9), ("critDMG_", 7.8)]);
+
+        assert!(match_score(&scanned, &target_elixir).is_some(), "Same elixir status must match");
+        assert!(match_score(&scanned, &target_normal).is_none(), "Different elixir status must reject");
     }
 }

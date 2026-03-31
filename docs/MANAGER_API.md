@@ -33,18 +33,131 @@ Request body size limit: 5 MB.
 
 ### `POST /manage` (async)
 
-Submit a batch of instructions. Returns immediately — poll `GET /status` for progress.
+Submit a batch of lock/unlock requests. Returns immediately — poll `GET /status` for progress.
 
 After accepting a job, the server waits 1 second before focusing the game window and starting execution. This lets the client see the state transition.
 
 #### Request
 
+Two lists of artifacts in **GOOD v3 format**. Each artifact represents the client's view of its **current state**. Which list it appears in determines the desired action:
+
+- `lock` — these artifacts should be **locked** after execution
+- `unlock` — these artifacts should be **unlocked** after execution
+
+The artifact's own `lock` field is ignored for determining intention — only list membership matters. This means stale data still expresses the correct intention (e.g., client thinks artifact is unlocked but it's already locked — if it's in the `lock` list, the server reports `already_correct` instead of toggling).
+
 ```json
 {
-  "instructions": [
+  "lock": [
     {
-      "id": "client-tracking-id",
-      "target": {
+      "setKey": "EmblemOfSeveredFate",
+      "slotKey": "sands",
+      "rarity": 5,
+      "level": 20,
+      "mainStatKey": "enerRech_",
+      "substats": [
+        {"key": "critRate_", "value": 10.5},
+        {"key": "critDMG_", "value": 19.4},
+        {"key": "atk_", "value": 5.8},
+        {"key": "hp", "value": 508}
+      ],
+      "location": "RaidenShogun",
+      "lock": false
+    }
+  ],
+  "unlock": [
+    {
+      "setKey": "GladiatorsFinale",
+      "slotKey": "flower",
+      "rarity": 5,
+      "level": 20,
+      "mainStatKey": "hp",
+      "substats": [
+        {"key": "critRate_", "value": 3.9},
+        {"key": "critDMG_", "value": 7.8}
+      ],
+      "location": "",
+      "lock": true
+    }
+  ]
+}
+```
+
+Each list item is a full (or partial) `GoodArtifact` object — the same format returned by `GET /artifacts` and the scanner export.
+
+#### Matching
+
+Artifacts are matched against the in-game backpack using these identity fields:
+
+| Field | Used for | Notes |
+|-------|----------|-------|
+| `setKey` | Hard match | GOOD v3 PascalCase (e.g. `"GladiatorsFinale"`) |
+| `slotKey` | Hard match | `flower` `plume` `sands` `goblet` `circlet` |
+| `rarity` | Hard match | 4–5 (only 4★ and 5★ artifacts are supported) |
+| `level` | Hard match | 0–20 |
+| `mainStatKey` | Hard match | GOOD v3 stat key (e.g. `"hp"`, `"atk_"`) |
+| `substats` | Hard match | `[{key, value}]`, order-independent. All keys must match exactly; each value must be within ±0.1 (OCR rounding tolerance). |
+| `unactivatedSubstats` | Hard match | Same format and rules. Level-0 artifacts may have one unactivated substat. |
+
+Other fields (`location`, `lock`, `astralMark`, `elixirCrafted`, `totalRolls`) are accepted but ignored during matching.
+
+#### Result IDs
+
+Since artifacts don't carry client-assigned IDs, results use positional IDs:
+- `"lock:0"`, `"lock:1"`, ... for items in the `lock` list
+- `"unlock:0"`, `"unlock:1"`, ... for items in the `unlock` list
+
+#### Responses
+
+| Code | When | Body |
+|------|------|------|
+| 202 | Job accepted | `{"jobId": "<uuid>", "total": N}` |
+| 400 | Bad JSON, both lists empty, or any entry invalid (empty keys, rarity outside 4–5, level outside 0–20) | `{"error": "..."}` |
+| 403 | Disallowed origin | `{"error": "Origin not allowed"}` |
+| 409 | Another job running | `{"error": "..."}` |
+| 413 | Body too large (>5 MB) | `{"error": "..."}` |
+| 503 | Manager paused | `{"error": "..."}` |
+
+### `POST /equip` (async) — NOT YET IMPLEMENTED
+
+> **Status: Not yet implemented.** This endpoint is documented for design purposes. The server will return 501 until implementation is complete.
+
+Submit a batch of equip/unequip instructions. Returns immediately — poll `GET /status` for progress.
+
+Unlike `POST /manage`, this endpoint does **not** perform a full backpack scan. It navigates directly to each target character's equipment screen to equip or unequip artifacts.
+
+After accepting a job, the server waits 1 second before focusing the game window and starting execution (same as `POST /manage`).
+
+#### Request
+
+A flat list of equip instructions. Each instruction pairs an artifact (GOOD v3 format, representing the client's view of its **current state**) with a target `location` (GOOD v3 character key).
+
+- To **equip** an artifact to a character: set `location` to the character key (e.g. `"RaidenShogun"`)
+- To **unequip** an artifact from its current owner: set `location` to `""` (empty string)
+
+```json
+{
+  "equip": [
+    {
+      "artifact": {
+        "setKey": "EmblemOfSeveredFate",
+        "slotKey": "sands",
+        "rarity": 5,
+        "level": 20,
+        "mainStatKey": "enerRech_",
+        "substats": [
+          {"key": "critRate_", "value": 10.5},
+          {"key": "critDMG_", "value": 19.4},
+          {"key": "atk_", "value": 5.8},
+          {"key": "hp", "value": 508}
+        ],
+        "location": "RaidenShogun",
+        "lock": true
+      },
+      "location": "Furina"
+    },
+    {
+      "artifact": {
         "setKey": "GladiatorsFinale",
         "slotKey": "flower",
         "rarity": 5,
@@ -53,43 +166,56 @@ After accepting a job, the server waits 1 second before focusing the game window
         "substats": [
           {"key": "critRate_", "value": 3.9},
           {"key": "critDMG_", "value": 7.8}
-        ]
+        ],
+        "location": "Furina",
+        "lock": true
       },
-      "changes": {
-        "lock": true,
-        "location": "Furina"
-      }
+      "location": ""
     }
   ]
 }
 ```
 
-#### Fields
+Each item in the `equip` list has two fields:
 
-| Field | Type | Required | Notes |
-|-------|------|----------|-------|
-| `id` | string | yes | Client-assigned ID, returned in results |
-| `target.setKey` | string | yes | GOOD v3 PascalCase (e.g. `"GladiatorsFinale"`) |
-| `target.slotKey` | string | yes | `flower` `plume` `sands` `goblet` `circlet` |
-| `target.rarity` | int | yes | 1–5 |
-| `target.level` | int | yes | 0–20 |
-| `target.mainStatKey` | string | yes | GOOD v3 stat key (e.g. `"hp"`, `"atk_"`) |
-| `target.substats` | array | yes | `[{key, value}]`, order-independent matching |
-| `changes.lock` | bool? | no | Set lock state. Omit or `null` to skip. |
-| `changes.location` | string? | no | GOOD character key to equip to. `""` = unequip. Omit or `null` to skip. |
+| Field | Type | Description |
+|-------|------|-------------|
+| `artifact` | `GoodArtifact` | The artifact to equip/unequip, in GOOD v3 format (current state as the client knows it) |
+| `location` | `string` | Target character key (e.g. `"Furina"`), or `""` to unequip |
 
-At least one of `lock` or `location` must be present.
+The artifact's own `location` field describes where the client believes it currently is — this is informational and not used for matching. The top-level `location` field on each instruction is the **desired** destination.
+
+#### Matching
+
+Artifact matching uses the same identity fields as `POST /manage` — see the [Matching](#matching) section above. All fields are hard match.
+
+The server identifies the artifact in-game by navigating to the target character's equipment screen and searching the relevant slot's artifact list.
+
+#### Result IDs
+
+Positional IDs based on order in the `equip` list:
+- `"equip:0"`, `"equip:1"`, `"equip:2"`, ...
+
+#### Game Swap Behavior
+
+When equipping an artifact that is currently equipped on another character, the game **automatically swaps** — the target character receives the artifact, and the previous owner loses it (the slot becomes empty). The client can assume this swap occurred on success and update both characters' state accordingly.
 
 #### Responses
 
 | Code | When | Body |
 |------|------|------|
 | 202 | Job accepted | `{"jobId": "<uuid>", "total": N}` |
-| 400 | Bad JSON or empty instructions | `{"error": "..."}` |
+| 400 | Bad JSON, `equip` list empty, or any entry invalid | `{"error": "..."}` |
 | 403 | Disallowed origin | `{"error": "Origin not allowed"}` |
-| 409 | Another job running | `{"error": "..."}` |
+| 409 | Another job running (manage or equip) | `{"error": "..."}` |
 | 413 | Body too large (>5 MB) | `{"error": "..."}` |
+| 501 | Not yet implemented | `{"error": "POST /equip is not yet implemented"}` |
 | 503 | Manager paused | `{"error": "..."}` |
+
+**Notes:**
+- Equip jobs share the same job queue as manage jobs — only one job of any type can run at a time. `GET /status` and `GET /result` work identically for both job types.
+- Equip does **not** produce an artifact snapshot. `GET /artifacts` is not updated after an equip job.
+- Invalid entries (empty `setKey`, rarity outside 4–5, unknown character key) reject the entire request with 400.
 
 ### `GET /status`
 
@@ -128,18 +254,18 @@ Lightweight poll — no result payload. Poll every 1 second.
 }
 ```
 
-### `GET /result`
+### `GET /result?jobId=<id>`
 
-Full execution result — only available after job completes. Call once after `GET /status` returns `"completed"`.
+Full execution result. Requires the `jobId` returned by `POST /manage`. Idempotent — can be called multiple times. Result is available until the next job replaces it.
 
 #### 200 OK (completed)
 
 ```json
 {
   "results": [
-    {"id": "instr-1", "status": "success"},
-    {"id": "instr-2", "status": "not_found", "detail": "背包中未找到匹配圣遗物 / ..."},
-    {"id": "instr-3", "status": "already_correct", "detail": "锁定状态已正确 / ..."}
+    {"id": "lock:0", "status": "success"},
+    {"id": "lock:1", "status": "not_found"},
+    {"id": "unlock:0", "status": "already_correct"}
   ],
   "summary": {
     "total": 3,
@@ -152,11 +278,14 @@ Full execution result — only available after job completes. Call once after `G
 }
 ```
 
+Each result contains only `id` and `status`. No human-readable detail — i18n is the client's responsibility.
+
 #### Other responses
 
 | Code | When |
 |------|------|
-| 404 | No completed job (idle) |
+| 400 | Missing `jobId` query parameter |
+| 404 | Job not found (wrong jobId, or replaced by a newer job) |
 | 409 | Job still running |
 
 ## Status Values
@@ -186,11 +315,16 @@ Latest complete artifact inventory snapshot. Updated after each manage job that 
     "level": 20,
     "rarity": 5,
     "mainStatKey": "hp",
-    "substats": [{"key": "critRate_", "value": 3.9}, {"key": "critDMG_", "value": 7.8}],
+    "substats": [
+      {"key": "critRate_", "value": 3.9, "initialValue": 3.9},
+      {"key": "critDMG_", "value": 7.8}
+    ],
+    "unactivatedSubstats": [],
     "location": "",
     "lock": true,
     "astralMark": false,
-    "elixirCrafted": false
+    "elixirCrafted": false,
+    "totalRolls": 8
   }
 ]
 ```
@@ -208,7 +342,6 @@ Latest complete artifact inventory snapshot. Updated after each manage job that 
 - If a scan is interrupted (user right-click abort), any previously cached data is invalidated (transitions to 503).
 - Lock states in the snapshot reflect the post-toggle state for successfully changed artifacts.
 - The snapshot persists in memory for the server's lifetime. It is not written to disk.
-- Equip-only jobs (no lock changes) do not trigger a backpack scan and do not affect the cache.
 
 ## Client Flow
 
@@ -219,9 +352,9 @@ Latest complete artifact inventory snapshot. Updated after each manage job that 
    → "running": show progress (completed/total)
    → "completed": proceed to step 4
    → no response: server crashed or game interrupted
-4. GET /result → full per-instruction results
+4. GET /result?jobId=<id> → full per-instruction results (idempotent)
 5. GET /artifacts → latest artifact inventory (optional, for syncing client state)
-6. Done. Next POST /manage will reset state.
+6. Done. Next POST /manage will replace the stored result.
 ```
 
 ## Cancellation
@@ -233,45 +366,86 @@ aborted instructions reflected in the results.
 
 ## Examples
 
-Lock + equip:
+Lock a single artifact:
 
 ```json
 {
-  "instructions": [{
-    "id": "1",
-    "target": {
-      "setKey": "EmblemOfSeveredFate",
-      "slotKey": "sands",
-      "rarity": 5,
-      "level": 20,
-      "mainStatKey": "enerRech_",
-      "substats": [
-        {"key": "critRate_", "value": 10.5},
-        {"key": "critDMG_", "value": 19.4},
-        {"key": "atk_", "value": 5.8},
-        {"key": "hp", "value": 508}
-      ]
-    },
-    "changes": {"lock": true, "location": "RaidenShogun"}
+  "lock": [{
+    "setKey": "EmblemOfSeveredFate",
+    "slotKey": "sands",
+    "rarity": 5,
+    "level": 20,
+    "mainStatKey": "enerRech_",
+    "substats": [
+      {"key": "critRate_", "value": 10.5},
+      {"key": "critDMG_", "value": 19.4},
+      {"key": "atk_", "value": 5.8},
+      {"key": "hp", "value": 508}
+    ],
+    "location": "RaidenShogun",
+    "lock": false
   }]
 }
 ```
 
-Batch:
+Batch lock + unlock:
 
 ```json
 {
-  "instructions": [
-    {"id": "a", "target": {...}, "changes": {"lock": true}},
-    {"id": "b", "target": {...}, "changes": {"lock": false}},
-    {"id": "c", "target": {...}, "changes": {"location": "Nahida"}}
+  "lock": [
+    {"setKey": "EmblemOfSeveredFate", "slotKey": "sands", "rarity": 5, "level": 20, "mainStatKey": "enerRech_", "substats": [...], "location": "", "lock": false},
+    {"setKey": "GladiatorsFinale", "slotKey": "flower", "rarity": 5, "level": 20, "mainStatKey": "hp", "substats": [...], "location": "", "lock": false}
+  ],
+  "unlock": [
+    {"setKey": "WanderersTroupe", "slotKey": "circlet", "rarity": 5, "level": 16, "mainStatKey": "critRate_", "substats": [...], "location": "Furina", "lock": true}
   ]
 }
 ```
 
-All instructions execute sequentially. Invalid ones are filtered and reported individually; valid ones still run.
+Level-0 artifact with unactivated substat:
+
+```json
+{
+  "lock": [{
+    "setKey": "GladiatorsFinale",
+    "slotKey": "flower",
+    "rarity": 5,
+    "level": 0,
+    "mainStatKey": "hp",
+    "substats": [
+      {"key": "critRate_", "value": 3.9},
+      {"key": "critDMG_", "value": 7.8},
+      {"key": "atk_", "value": 5.8}
+    ],
+    "unactivatedSubstats": [
+      {"key": "def", "value": 23.0}
+    ],
+    "location": "",
+    "lock": false
+  }]
+}
+```
+
+All targets execute in a single backpack scan pass. Invalid entries (empty keys, rarity outside 4–5, level outside 0–20) reject the entire request with 400 — fix all entries before resubmitting.
 
 ## Changelog
+
+### 2026-03-30 (v2)
+
+- **BREAKING: Validation rejects entire request** — Any invalid entry (empty keys, rarity outside 4–5, level outside 0–20) now returns 400 for the whole request. Previously, invalid entries were filtered and reported individually while valid entries still ran.
+- **BREAKING: `GET /result` requires `jobId`** — `GET /result?jobId=<id>`. Returns 400 without it. Returns 404 if the jobId doesn't match. This prevents accidentally reading a stale job's result.
+- **`GET /result` is idempotent** — Can be called multiple times. Result persists until the next job replaces it.
+- **Removed `detail` from results** — `InstructionResult` no longer includes a human-readable `detail` field. The `status` enum uniquely identifies each scenario; i18n is the client's responsibility.
+- **Substats are hard match** — `substats` and `unactivatedSubstats` are now hard-match fields (previously scoring). All keys must match exactly; each value within ±0.1 tolerance.
+
+### 2026-03-30
+
+- **`POST /equip` documented (not yet implemented)** — New endpoint for equipping/unequipping artifacts to characters. Uses a flat `equip` list of `{artifact, location}` instructions. Same async job model and artifact matching as `POST /manage`. Shares the job queue (one job at a time across both endpoints). Does not produce an artifact snapshot. Server returns 501 until implementation is complete.
+- **BREAKING: `POST /manage` redesigned** — Replaced instruction-based format (`instructions` array with `id`/`target`/`changes`) with GOOD-format lock/unlock lists (`lock` and `unlock` arrays of `GoodArtifact`). Lock intention is determined by list membership, not by a `changes.lock` field. Result IDs are positional (`lock:0`, `unlock:1`, etc.).
+- **Equip removed** — The `changes.location` field and equip/unequip functionality have been removed from this endpoint. Equip will be a separate API in the future.
+- **Unactivated substats** — `unactivatedSubstats` is now included in artifact matching (scoring), and the `GET /artifacts` response includes it for level-0 artifacts.
+- **Rarity restriction** — Only 4★ and 5★ artifacts are accepted (rarity must be 4 or 5). The backpack scan stops early when it encounters artifacts below this threshold.
+- **Rarity early-stop in scanner** — Both the artifact scanner and lock manager now stop scanning when artifacts drop below `min_rarity`, using a shared helper. The scanner previously used hardcoded thresholds (`≤3` for artifacts, `≤2` for weapons); both now use the configured `min_rarity`.
 
 ### 2026-03-29
 

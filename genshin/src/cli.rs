@@ -677,8 +677,8 @@ impl GoodScannerApplication {
         let overrides = user_config.to_overrides();
         if let Some(ref n) = overrides.traveler_name { debug!("旅行者 / Traveler: {}", n); }
         if let Some(ref n) = overrides.wanderer_name { debug!("流浪者 / Wanderer: {}", n); }
-        if let Some(ref n) = overrides.manekin_name { debug!("奇偶·男 / Manekin: {}", n); }
-        if let Some(ref n) = overrides.manekina_name { debug!("奇偶·女 / Manekina: {}", n); }
+        if let Some(ref n) = overrides.manekin_name { debug!("奇偶·男性 / Manekin: {}", n); }
+        if let Some(ref n) = overrides.manekina_name { debug!("奇偶·女性 / Manekina: {}", n); }
         let mappings = Arc::new(MappingManager::new(&overrides)?);
         info!(
             "已加载 / Loaded: {} characters, {} weapons, {} artifact sets",

@@ -20,8 +20,17 @@ Yas (Yet Another Scanner) is a Rust application that scans Genshin Impact in-gam
 
 ```
 src/
-├── cli.rs                     # CLI entry point, orchestrates all scanning
+├── cli.rs                     # CLI entry point, orchestrates all scanning + run_server_core()
+├── server.rs                  # HTTP server (tiny_http): /manage, /equip, /status, /result, /artifacts
 ├── updater.rs                 # Auto-update: GitHub release check + self-replace
+├── manager/                   # Artifact lock/equip manager (server-driven)
+│   ├── orchestrator.rs        # ArtifactManager: top-level execute() and execute_equip()
+│   ├── lock_manager.rs        # LockManager: single-pass backpack scan + per-page lock toggle
+│   ├── equip_manager.rs       # EquipManager: equip/unequip via character screen navigation
+│   ├── matching.rs            # Hard-match artifacts: all fields + 0.1 substat tolerance
+│   ├── models.rs              # Request/response types: LockManageRequest, EquipRequest, ManageResult
+│   ├── ui_actions.rs          # Game UI helpers: click lock button, open character screen, etc.
+│   └── mod.rs
 ├── scanner/
 │   ├── common/                # Shared scanner infrastructure
 │   │   ├── game_controller.rs # Mouse/keyboard/capture control
@@ -33,12 +42,28 @@ src/
 │   │   ├── diff.rs            # Groundtruth comparison tooling
 │   │   ├── constants.rs       # Grid positions, UI coordinates
 │   │   ├── ocr_factory.rs     # OCR backend selection (ppocrv3/v4/v5)
+│   │   ├── ocr_pool.rs        # Channel-based pool of N OCR model instances
 │   │   ├── pixel_utils.rs     # Color/pixel analysis helpers
 │   │   ├── fuzzy_match.rs     # Fuzzy string matching for OCR results
 │   │   └── navigation.rs      # Tab/page navigation helpers
 │   ├── character/              # Character panel OCR
 │   ├── weapon/                 # Weapon panel OCR
-│   └── artifact/               # Artifact panel OCR
+│   └── artifact/               # Artifact panel OCR (scanner.rs has identify_artifact, scan_level_only)
+```
+
+### Key Modules (application)
+
+```
+src/
+├── main.rs                    # Entry point: CLI mode or GUI mode
+└── gui/
+    ├── mod.rs                 # eframe App impl, tab routing
+    ├── state.rs               # AppState: all GUI state fields
+    ├── worker.rs              # spawn_scan(), spawn_server() — background thread launchers
+    ├── manager_tab.rs         # Manager tab UI: server start/stop, update_inventory checkbox
+    ├── scan_tab.rs            # Scan tab UI: scan target checkboxes, options
+    ├── settings_tab.rs        # Settings tab: config editing
+    └── log_tab.rs             # Log viewer tab
 ```
 
 ### How Scanning Works
@@ -149,6 +174,36 @@ All help text is bilingual (Chinese + English). Flags are grouped into four sect
 - Chinese (zh_CN) game client only — OCR models trained on Chinese game text
 - GOOD v3 format spec: keys use PascalCase (e.g., `"SkywardHarp"`, `"Furina"`)
 - The `data/` directory (gitignored) caches remote mapping files
+
+## Manager & HTTP Server
+
+### Architecture
+
+Two-thread model: HTTP thread (tiny_http) handles requests, execution thread owns the game controller and processes jobs sequentially. Communication via `mpsc` channel + `Arc<Mutex<JobState>>`.
+
+### Data flow
+
+1. Client sends `POST /manage` (lock/unlock) or `POST /equip` → server validates all entries, returns 202 with `jobId`
+2. Client polls `GET /status` for progress
+3. Execution thread: `ArtifactManager` → `LockManager` (backpack scan + toggle) or `EquipManager` (character screen navigation)
+4. Client fetches `GET /result?jobId=xxx` (idempotent) for final results
+5. If scan completed fully, `GET /artifacts` returns the artifact snapshot
+
+### Key config flow
+
+GUI `state.update_inventory` (bool, default true) → inverted to `stop_on_all_matched` → passed through `cli.rs::run_server_core()` → `ArtifactManager::new()` → `LockManager::execute()`.
+
+### Matching (matching.rs)
+
+All fields are hard-match (reject on mismatch): set, slot, rarity, level, main stat, elixir_crafted, substats, unactivated substats. Substat values allow 0.1 tolerance for OCR rounding. `location`, `lock`, `astral_mark` are NOT matched (they change independently of artifact identity).
+
+### Lock toggle flow (lock_manager.rs)
+
+Per-page: scan all items via pipelined OCR → match against targets → re-click matched positions → toggle lock → verify pixel. Page-skip optimization: in fast mode, OCR the last item's level first; if > max target level, skip the page entirely (inventory sorted by level descending).
+
+### Snapshot (orchestrator.rs)
+
+After a complete scan, builds an artifact snapshot reflecting post-toggle state: updates `lock` and clears `astral_mark` on unlock (game forces this). Served via `GET /artifacts`.
 
 ## Fuzzy Matching (`fuzzy_match.rs`)
 

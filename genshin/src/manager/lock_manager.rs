@@ -80,15 +80,15 @@ impl LockManager {
         delay_grid_item: u64,
         delay_scroll: u64,
         stop_on_all_matched: bool,
+        max_target_level: i32,
     ) -> (Vec<InstructionResult>, Vec<(usize, GoodArtifact)>, HashMap<usize, usize>, bool) {
         let mut results: HashMap<String, InstructionResult> = HashMap::new();
         let mut scanned_artifacts: Vec<(usize, GoodArtifact)> = Vec::new();
 
-        let make_error_results = |targets: &[LockTarget], status: InstructionStatus, detail: String| -> Vec<InstructionResult> {
+        let make_error_results = |targets: &[LockTarget], status: InstructionStatus| -> Vec<InstructionResult> {
             targets.iter().map(|t| InstructionResult {
                 id: t.result_id.clone(),
                 status: status.clone(),
-                detail: Some(detail.clone()),
             }).collect()
         };
 
@@ -102,7 +102,7 @@ impl LockManager {
             Err(e) => {
                 warn!("OCR模型创建失败 / OCR model creation failed: {}", e);
                 return (
-                    make_error_results(targets, InstructionStatus::OcrError, format!("OCR模型创建失败 / OCR model creation failed: {}", e)),
+                    make_error_results(targets, InstructionStatus::OcrError),
                     scanned_artifacts,
                     HashMap::new(),
                     false,
@@ -118,7 +118,7 @@ impl LockManager {
             Err(e) => {
                 warn!("副属性OCR模型创建失败 / Substat OCR model creation failed: {}", e);
                 return (
-                    make_error_results(targets, InstructionStatus::OcrError, format!("OCR模型创建失败 / OCR model creation failed: {}", e)),
+                    make_error_results(targets, InstructionStatus::OcrError),
                     scanned_artifacts,
                     HashMap::new(),
                     false,
@@ -131,7 +131,7 @@ impl LockManager {
             Err(e) => {
                 warn!("OCR模型创建失败 / OCR model creation failed: {}", e);
                 return (
-                    make_error_results(targets, InstructionStatus::OcrError, format!("OCR模型创建失败 / OCR model creation failed: {}", e)),
+                    make_error_results(targets, InstructionStatus::OcrError),
                     scanned_artifacts,
                     HashMap::new(),
                     false,
@@ -157,7 +157,7 @@ impl LockManager {
             Err(e) => {
                 warn!("无法读取圣遗物数量 / Cannot read artifact count: {}", e);
                 return (
-                    make_error_results(targets, InstructionStatus::OcrError, format!("无法读取数量 / Cannot read count: {}", e)),
+                    make_error_results(targets, InstructionStatus::OcrError),
                     scanned_artifacts,
                     HashMap::new(),
                     false,
@@ -171,7 +171,6 @@ impl LockManager {
                 targets.iter().map(|t| InstructionResult {
                     id: t.result_id.clone(),
                     status: InstructionStatus::NotFound,
-                    detail: Some("背包中没有圣遗物 / No artifacts in backpack".to_string()),
                 }).collect(),
                 scanned_artifacts,
                 HashMap::new(),
@@ -196,12 +195,55 @@ impl LockManager {
         let mut scanned_row: usize = 0;
         let mut pages_scrolled: u32 = 0;
         let mut stop_after_page = false;
+        let mut page_skipped: bool;
 
         let scaler_arc = Arc::new(scaler.clone());
 
         // --- Per-page scan + lock toggle loop ---
         'outer: while scanned_count < total {
             let visible_rows = GRID_ROWS.min(total_rows - scanned_row);
+
+            // Page-skip optimization: in fast mode, click the last item on this page
+            // and OCR its level. If it's strictly higher than the highest target level,
+            // all items on this page are too high (inventory is sorted by level descending)
+            // and we can skip the entire page.
+            page_skipped = false;
+            if max_target_level >= 0 {
+                let last_row = visible_rows - 1;
+                let last_col = if scanned_row + last_row == total_rows - 1 {
+                    last_row_cols - 1
+                } else {
+                    GRID_COLS - 1
+                };
+                let x = GRID_FIRST_X + last_col as f64 * GRID_OFFSET_X;
+                let y = GRID_FIRST_Y + last_row as f64 * GRID_OFFSET_Y;
+                ctrl.click_at(x, y);
+                let _ = ctrl.wait_until_panel_loaded(PANEL_POOL_RECT, 400);
+                yas::utils::sleep(first_delay as u32);
+
+                if let Ok(image) = ctrl.capture_game() {
+                    let ocr_guard = ocr_pool.get();
+                    let level = GoodArtifactScanner::scan_level_only(
+                        &ocr_guard as &dyn yas::ocr::ImageToText<image::RgbImage>,
+                        &image,
+                        &scaler,
+                    );
+                    if level > max_target_level {
+                        let page_items = (0..visible_rows).map(|r| {
+                            if scanned_row + r == total_rows - 1 { last_row_cols } else { GRID_COLS }
+                        }).sum::<usize>();
+                        info!(
+                            "[lock_manager] 页面跳过：末尾等级={} > 最高目标等级={}，跳过 {} 个 / Page skip: last level={} > max target={}, skipping {} items",
+                            level, max_target_level, page_items, level, max_target_level, page_items
+                        );
+                        scanned_count += page_items;
+                        scanned_row += visible_rows;
+                        page_skipped = true;
+                    }
+                }
+            }
+
+            if !page_skipped {
 
             // Result channel for pipelined OCR
             let (result_tx, result_rx) = crossbeam_channel::unbounded::<(usize, usize, usize, Option<GoodArtifact>)>();
@@ -335,10 +377,6 @@ impl LockManager {
                             results.insert(target.result_id.clone(), InstructionResult {
                                 id: target.result_id.clone(),
                                 status: InstructionStatus::AlreadyCorrect,
-                                detail: Some(format!(
-                                    "锁定状态已正确 / Lock already {}",
-                                    if target.desired_lock { "locked" } else { "unlocked" }
-                                )),
                             });
                         } else {
                             let y_shift = if artifact.elixir_crafted { 40.0 } else { 0.0 };
@@ -360,7 +398,6 @@ impl LockManager {
                     results.insert(toggle.result_id.clone(), InstructionResult {
                         id: toggle.result_id.clone(),
                         status: InstructionStatus::Aborted,
-                        detail: Some(format!("{}", ctrl.cancel_token().reason().unwrap())),
                     });
                     continue;
                 }
@@ -374,10 +411,10 @@ impl LockManager {
 
                 // Toggle lock
                 if let Err(e) = ui_actions::click_lock_button(ctrl, toggle.y_shift) {
+                    warn!("[lock_manager] 锁定切换失败 / Lock toggle failed: {}", e);
                     results.insert(toggle.result_id.clone(), InstructionResult {
                         id: toggle.result_id.clone(),
                         status: InstructionStatus::UiError,
-                        detail: Some(format!("锁定切换失败 / Lock toggle failed: {}", e)),
                     });
                     continue;
                 }
@@ -391,7 +428,6 @@ impl LockManager {
                         results.insert(toggle.result_id.clone(), InstructionResult {
                             id: toggle.result_id.clone(),
                             status: InstructionStatus::UiError,
-                            detail: Some(format!("截图失败 / Capture failed: {}", e)),
                         });
                         continue;
                     }
@@ -406,7 +442,6 @@ impl LockManager {
                     results.insert(toggle.result_id.clone(), InstructionResult {
                         id: toggle.result_id.clone(),
                         status: InstructionStatus::Success,
-                        detail: None,
                     });
                 } else {
                     warn!(
@@ -416,11 +451,6 @@ impl LockManager {
                     results.insert(toggle.result_id.clone(), InstructionResult {
                         id: toggle.result_id.clone(),
                         status: InstructionStatus::UiError,
-                        detail: Some(format!(
-                            "锁定切换验证失败（期望={}，实际={}）/ \
-                             Lock toggle verification failed (expected={}, actual={})",
-                            toggle.desired_lock, new_lock, toggle.desired_lock, new_lock
-                        )),
                     });
                 }
             }
@@ -436,6 +466,8 @@ impl LockManager {
                 info!("[lock_manager] 所有目标已匹配，提前停止 / All targets matched, stopping early");
                 break;
             }
+
+            } // end else (page was not skipped)
 
             // Step 5: Scroll to next page
             let remain = total.saturating_sub(scanned_count);
@@ -475,7 +507,9 @@ impl LockManager {
         }
 
         // Scan is complete only if we visited every item without interruption and no early-stop
-        let scan_complete = scanned_count >= total && !ctrl.is_cancelled() && !stop_after_page;
+        // Rarity early-stop is a complete scan — we visited all relevant (4★+) artifacts.
+        // Only cancellation or RMB abort counts as incomplete.
+        let scan_complete = (scanned_count >= total || stop_after_page) && !ctrl.is_cancelled();
 
         // Mark unmatched targets
         let was_cancelled = ctrl.is_cancelled();
@@ -488,11 +522,6 @@ impl LockManager {
                     } else {
                         InstructionStatus::NotFound
                     },
-                    detail: Some(if was_cancelled {
-                        format!("{}", ctrl.cancel_token().reason().unwrap_or(yas::cancel::StopReason::UserAbort))
-                    } else {
-                        "背包中未找到匹配圣遗物 / Matching artifact not found in inventory".to_string()
-                    }),
                 });
             }
         }

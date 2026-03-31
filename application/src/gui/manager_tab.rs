@@ -81,10 +81,10 @@ pub fn show(
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.checkbox(
-                &mut state.stop_on_all_matched,
+                &mut state.update_inventory,
                 l.t(
-                    "匹配完成后停止扫描（更快，但无法提供完整圣遗物快照）",
-                    "Stop after all matched (faster, but no full inventory snapshot)",
+                    "扫描后更新圣遗物列表",
+                    "Update inventory after scan",
                 ),
             );
         });

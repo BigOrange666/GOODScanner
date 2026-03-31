@@ -48,7 +48,7 @@ pub fn show(
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 200, 50),
                     l.t(
-                        "请填写必填角色名称（旅行者、奇偶·男、奇偶·女），然后再次点击开始扫描。",
+                        "请填写必填角色名称（旅行者、奇偶·男性、奇偶·女性），然后再次点击开始扫描。",
                         "Fill in the required names (Traveler, Manekin, Manekina), then click Start Scan again.",
                     ),
                 );
@@ -83,12 +83,12 @@ pub fn show(
             ui.horizontal(|ui| {
                 let manekin_empty = state.names_need_attention && state.user_config.manekin_name.trim().is_empty();
                 let label_color = if manekin_empty { egui::Color32::from_rgb(255, 100, 100) } else { required_color };
-                ui.colored_label(label_color, l.t("奇偶·男*", "Manekin*"));
+                ui.colored_label(label_color, l.t("奇偶·男性*", "Manekin*"));
                 ui.add(egui::TextEdit::singleline(&mut state.user_config.manekin_name).desired_width(field_w));
                 ui.add_space(16.0);
                 let manekina_empty = state.names_need_attention && state.user_config.manekina_name.trim().is_empty();
                 let label_color = if manekina_empty { egui::Color32::from_rgb(255, 100, 100) } else { required_color };
-                ui.colored_label(label_color, l.t("奇偶·女*", "Manekina*"));
+                ui.colored_label(label_color, l.t("奇偶·女性*", "Manekina*"));
                 ui.add(egui::TextEdit::singleline(&mut state.user_config.manekina_name).desired_width(field_w));
             });
 
@@ -235,7 +235,7 @@ fn action_bar(
                 if required_missing {
                     state.names_need_attention = true;
                     log::warn!("{}", l.t(
-                        "旅行者、奇偶·男、奇偶·女为必填项",
+                        "旅行者、奇偶·男性、奇偶·女性为必填项",
                         "Traveler, Manekin, and Manekina names are required",
                     ));
                 } else {

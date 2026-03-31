@@ -33,7 +33,7 @@ pub const DEFAULT_DELAY_CHAR_TAB_SWITCH: u64 = 500;
 pub const DEFAULT_DELAY_CHAR_NEXT: u64 = 300;
 pub const DEFAULT_DELAY_INV_TAB_SWITCH: u64 = 400;
 pub const DEFAULT_DELAY_SCROLL: u64 = 200;
-pub const DEFAULT_DELAY_GRID_ITEM: u64 = 120;
+pub const DEFAULT_DELAY_GRID_ITEM: u64 = 125;
 
 // ================================================================
 // Character scanner coordinates (at 1920x1080 base resolution)

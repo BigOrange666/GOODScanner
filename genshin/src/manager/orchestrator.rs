@@ -94,6 +94,13 @@ impl ArtifactManager {
             targets.iter().filter(|t| !t.desired_lock).count(),
         );
 
+        // In fast mode, compute the highest target level for page-skip optimization.
+        let max_target_level = if self.stop_on_all_matched {
+            targets.iter().map(|t| t.artifact.level).max().unwrap_or(0)
+        } else {
+            -1 // disabled
+        };
+
         let lock_mgr = LockManager::new(
             self.mappings.clone(),
             self.ocr_backend.clone(),
@@ -105,6 +112,7 @@ impl ArtifactManager {
             self.delay_grid_item,
             self.delay_scroll,
             self.stop_on_all_matched,
+            max_target_level,
         );
 
         for r in &lock_results {
@@ -219,6 +227,10 @@ fn build_artifact_snapshot(
         if let Some(&desired_lock) = toggled_to.get(idx) {
             let mut updated = artifact.clone();
             updated.lock = desired_lock;
+            // Unlocking removes astral mark (game engine forces this)
+            if !desired_lock {
+                updated.astral_mark = false;
+            }
             updated
         } else {
             artifact.clone()

@@ -19,6 +19,11 @@ lazy_static = "1.4"
 serde = { version = "1.0", features = ["derive"] }
 enigo = "0.1"
 reqwest = { version = "0.11", features = ["blocking", "json"] }
+auto-artifactarium = { git = "https://github.com/konkers/auto-artifactarium", rev = "c5fa36b84e05ad0339fee8a0a420d26900b824b7" }
+indexmap = "2"
+base64 = "0.22"
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
+tokio-util = "0.7"
 crossbeam-channel = "0.5"
 rayon = "1.7"
 indicatif = "0.17"
@@ -29,3 +34,5 @@ uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-capture = "=1.0.65"
+pktmon = { version = "0.6", features = ["tokio"] }
+futures = "0.3"

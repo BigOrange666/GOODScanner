@@ -482,10 +482,10 @@ impl GoodArtifactScanner {
         use crate::scanner::common::debug_dump::DumpCtx;
         use super::super::common::constants::{ARTIFACT_LOCK_POS1, ARTIFACT_ASTRAL_POS1, STAR_Y};
 
-        // 0. Detect rarity — stop on 3-star or below
+        // 0. Detect rarity — stop below min_rarity
         let rarity = pixel_utils::detect_artifact_rarity(image, scaler);
-        if rarity <= 3 {
-            debug!("[artifact] 检测到{}星物品，停止 / [artifact] detected {}* item, stopping", rarity, rarity);
+        if rarity < config.min_rarity {
+            log::debug!("[artifact] {}* < min {}*, stopping", rarity, config.min_rarity);
             return Ok(ArtifactScanResult::Stop);
         }
 
@@ -1069,6 +1069,24 @@ impl GoodArtifactScanner {
     /// failure, no debug dumps) and returns `Ok(None)` for low-rarity or
     /// unrecognizable artifacts instead of stopping/erroring.
     ///
+    /// Quick level-only OCR for page-skip optimization.
+    /// Returns the artifact level (0-20), or -1 if OCR fails.
+    ///
+    /// 快速等级OCR，用于页面跳过优化。
+    pub fn scan_level_only(
+        ocr: &dyn ImageToText<RgbImage>,
+        image: &RgbImage,
+        scaler: &CoordScaler,
+    ) -> i32 {
+        let regions = ArtifactOcrRegions::new();
+        let text = Self::ocr_image_region_shifted(ocr, image, regions.level, 0.0, scaler)
+            .unwrap_or_default();
+        LEVEL_REGEX.captures(&text)
+            .and_then(|c| c[1].parse::<i32>().ok())
+            .filter(|&v| v <= 20)
+            .unwrap_or(-1)
+    }
+
     /// 从游戏截图中识别单个圣遗物（同步调用）。
     /// 供圣遗物管理模块使用。
     pub fn identify_artifact(
@@ -1191,12 +1209,8 @@ impl GoodArtifactScanner {
         let (item_tx, worker_handle) = scan_worker::start_worker::<(), GoodArtifact, _>(
             total_count as usize,
             move |work_item: WorkItem<()>| {
-                // Quick rarity check — stop on 3-star or below.
-                // Note: returning Err with a special message to signal stop.
-                let rarity = pixel_utils::detect_artifact_rarity(&work_item.image, &worker_scaler);
-                if rarity <= 3 {
-                    debug!("[artifact] 检测到{}星物品在索引{}，信号停止 / [artifact] detected {}* item at index {}, signaling stop", rarity, work_item.index, rarity, work_item.index);
-                    // Signal stop via the worker handle's AtomicBool
+                // Quick rarity check — stop below min_rarity.
+                if pixel_utils::artifact_below_min_rarity(&work_item.image, &worker_scaler, worker_config.min_rarity) {
                     return Ok(None);
                 }
 
@@ -1249,9 +1263,7 @@ impl GoodArtifactScanner {
                         }
 
                         // Quick rarity check on main thread to stop early
-                        let rarity = pixel_utils::detect_artifact_rarity(&image, &scaler);
-                        if rarity <= 3 {
-                            debug!("[artifact] 检测到{}星物品 idx={}，停止截图 / [artifact] detected {}* item at idx={}, stopping capture", rarity, idx, rarity, idx);
+                        if pixel_utils::artifact_below_min_rarity(&image, &scaler, self.config.min_rarity) {
                             return ScanAction::Stop;
                         }
 
