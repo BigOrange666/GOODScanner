@@ -1,36 +1,49 @@
 use serde::{Deserialize, Serialize};
 
-use crate::scanner::common::models::GoodSubStat;
+use crate::scanner::common::models::{GoodArtifact, GoodSubStat};
 
-/// A batch of artifact change instructions.
-/// 圣遗物管理指令批次。
+/// Lock/unlock request: two lists of artifacts in GOOD v3 format.
+///
+/// Each artifact represents the client's view of its **current state**.
+/// Which list it appears in determines the desired lock action:
+/// - `lock`: these artifacts should be locked after execution
+/// - `unlock`: these artifacts should be unlocked after execution
+///
+/// The artifact's own `lock` field is ignored for determining intention —
+/// only list membership matters. This allows stale data to still express
+/// the correct intention.
+///
+/// 锁定/解锁请求：两个 GOOD v3 格式的圣遗物列表。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockManageRequest {
+    /// Artifacts that should be locked.
+    #[serde(default)]
+    pub lock: Vec<GoodArtifact>,
+    /// Artifacts that should be unlocked.
+    #[serde(default)]
+    pub unlock: Vec<GoodArtifact>,
+}
+
+// ---------------------------------------------------------------------------
+// Legacy types — kept temporarily for other modules still referencing them.
+// Will be removed as subsequent tasks migrate callers to LockManageRequest.
+// ---------------------------------------------------------------------------
+
+/// DEPRECATED: Use `LockManageRequest` instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactManageRequest {
     pub instructions: Vec<ArtifactInstruction>,
 }
 
-/// A single artifact management instruction.
-/// 单条圣遗物管理指令。
+/// DEPRECATED: Use `LockManageRequest` instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactInstruction {
-    /// Unique identifier for this instruction (client-assigned, for tracking).
-    /// 指令唯一标识（由客户端分配，用于跟踪）。
     pub id: String,
-
-    /// Fields used to identify the target artifact in-game.
-    /// 用于在游戏中识别目标圣遗物的字段。
     pub target: ArtifactTarget,
-
-    /// What changes to apply. At least one field must be Some.
-    /// 要应用的更改。至少一个字段必须为 Some。
     pub changes: ArtifactChanges,
 }
 
-/// Identity of an artifact — enough fields to uniquely match one in-game.
-/// All fields are required for reliable matching.
-///
-/// 圣遗物身份标识——用于在游戏中唯一匹配一个圣遗物。
-/// 所有字段都是必需的。
+/// DEPRECATED: Use `GoodArtifact` for matching instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactTarget {
     #[serde(rename = "setKey")]
@@ -41,27 +54,14 @@ pub struct ArtifactTarget {
     pub level: i32,
     #[serde(rename = "mainStatKey")]
     pub main_stat_key: String,
-    /// Active substats (order-independent for matching).
-    /// 副属性（匹配时不考虑顺序）。
     pub substats: Vec<GoodSubStat>,
 }
 
-/// Changes to apply to the matched artifact.
-/// 要应用到匹配圣遗物的更改。
+/// DEPRECATED: Use list membership in `LockManageRequest` instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactChanges {
-    /// If Some, set lock to this state.
-    /// 如果为 Some，将锁定状态设置为此值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock: Option<bool>,
-
-    /// If Some, change equipment. Empty string means unequip.
-    /// Non-empty string is the GOOD character key to equip to.
-    /// The game auto-swaps when equipping to a new character.
-    ///
-    /// 如果为 Some，更改装备。空字符串表示卸下。
-    /// 非空字符串是要装备到的 GOOD 角色键名。
-    /// 游戏在装备到新角色时会自动交换。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
 }
@@ -245,5 +245,86 @@ impl JobState {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lock_manage_request_deser() {
+        let json = r#"{
+            "lock": [{
+                "setKey": "GladiatorsFinale",
+                "slotKey": "flower",
+                "rarity": 5,
+                "level": 20,
+                "mainStatKey": "hp",
+                "substats": [{"key": "critRate_", "value": 3.9}],
+                "location": "",
+                "lock": false
+            }],
+            "unlock": [{
+                "setKey": "WanderersTroupe",
+                "slotKey": "plume",
+                "rarity": 5,
+                "level": 16,
+                "mainStatKey": "atk",
+                "substats": [{"key": "hp", "value": 508.0}],
+                "location": "Furina",
+                "lock": true
+            }]
+        }"#;
+        let req: LockManageRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.lock.len(), 1);
+        assert_eq!(req.unlock.len(), 1);
+        assert_eq!(req.lock[0].set_key, "GladiatorsFinale");
+        assert_eq!(req.unlock[0].set_key, "WanderersTroupe");
+    }
+
+    #[test]
+    fn test_lock_manage_request_empty_lists() {
+        let json = r#"{"lock": [], "unlock": []}"#;
+        let req: LockManageRequest = serde_json::from_str(json).unwrap();
+        assert!(req.lock.is_empty());
+        assert!(req.unlock.is_empty());
+    }
+
+    #[test]
+    fn test_lock_manage_request_one_list_only() {
+        let json = r#"{
+            "lock": [{
+                "setKey": "GladiatorsFinale", "slotKey": "flower",
+                "rarity": 5, "level": 20, "mainStatKey": "hp",
+                "substats": [], "location": "", "lock": false
+            }]
+        }"#;
+        let req: LockManageRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.lock.len(), 1);
+        assert!(req.unlock.is_empty());
+    }
+
+    #[test]
+    fn test_lock_manage_request_with_unactivated_substats() {
+        let json = r#"{
+            "lock": [{
+                "setKey": "GladiatorsFinale", "slotKey": "flower",
+                "rarity": 5, "level": 0, "mainStatKey": "hp",
+                "substats": [
+                    {"key": "critRate_", "value": 3.9},
+                    {"key": "critDMG_", "value": 7.8},
+                    {"key": "atk_", "value": 5.8}
+                ],
+                "unactivatedSubstats": [
+                    {"key": "def", "value": 23.0}
+                ],
+                "location": "", "lock": false
+            }]
+        }"#;
+        let req: LockManageRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.lock[0].substats.len(), 3);
+        assert_eq!(req.lock[0].unactivated_substats.len(), 1);
+        assert_eq!(req.lock[0].unactivated_substats[0].key, "def");
     }
 }
