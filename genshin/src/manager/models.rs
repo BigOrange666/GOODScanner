@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::scanner::common::models::{GoodArtifact, GoodSubStat};
+use crate::scanner::common::models::GoodArtifact;
 
 /// Lock/unlock request: two lists of artifacts in GOOD v3 format.
 ///
@@ -22,25 +22,6 @@ pub struct LockManageRequest {
     /// Artifacts that should be unlocked.
     #[serde(default)]
     pub unlock: Vec<GoodArtifact>,
-}
-
-// ---------------------------------------------------------------------------
-// Legacy types — kept temporarily for ui_actions.rs which still references
-// ArtifactTarget. Will be removed when ui_actions is migrated.
-// ---------------------------------------------------------------------------
-
-/// DEPRECATED: Use `GoodArtifact` for matching instead.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArtifactTarget {
-    #[serde(rename = "setKey")]
-    pub set_key: String,
-    #[serde(rename = "slotKey")]
-    pub slot_key: String,
-    pub rarity: i32,
-    pub level: i32,
-    #[serde(rename = "mainStatKey")]
-    pub main_stat_key: String,
-    pub substats: Vec<GoodSubStat>,
 }
 
 // ---------------------------------------------------------------------------

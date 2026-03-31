@@ -15,7 +15,7 @@ use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::ocr_factory;
 
-use super::models::ArtifactTarget;
+use crate::scanner::common::models::GoodArtifact;
 
 // ================================================================
 // Calibrated coordinates for artifact manager UI interactions
@@ -467,7 +467,7 @@ pub fn clear_set_filter(ctrl: &mut GenshinGameController) -> Result<()> {
 /// Returns `Ok(true)` if found and equipped, `Ok(false)` if not found.
 pub fn find_and_click_artifact_in_selection(
     ctrl: &mut GenshinGameController,
-    target: &ArtifactTarget,
+    target: &GoodArtifact,
     ocr: &dyn ImageToText<RgbImage>,
     _scaler: &CoordScaler,
     mappings: &MappingManager,
@@ -620,7 +620,7 @@ fn parse_level(text: &str) -> i32 {
 pub fn verify_artifact_equipped(
     _ctrl: &GenshinGameController,
     _slot_key: &str,
-    _target: &ArtifactTarget,
+    _target: &GoodArtifact,
     _scaler: &CoordScaler,
 ) -> Result<bool> {
     // For now, trust the equip click succeeded.
