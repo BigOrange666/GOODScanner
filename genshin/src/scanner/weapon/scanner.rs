@@ -646,3 +646,198 @@ impl GoodWeaponScanner {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scanner::common::test_utils::*;
+
+    fn default_config() -> GoodWeaponScannerConfig {
+        GoodWeaponScannerConfig {
+            verbose: false,
+            dump_images: false,
+            continue_on_failure: false,
+            ..Default::default()
+        }
+    }
+
+    fn make_weapon_image(rarity: i32, locked: bool) -> RgbImage {
+        let mut img = make_1080p_image();
+        paint_rarity_stars(&mut img, rarity);
+        paint_weapon_lock(&mut img, locked);
+        img
+    }
+
+    #[test]
+    fn test_weapon_happy_path_5star_locked() {
+        let image = make_weapon_image(5, true);
+        let scaler = make_1080p_scaler();
+        let regions = WeaponOcrRegions::new();
+        let mappings = make_test_mappings();
+        let config = default_config();
+
+        let ocr = FakeOcr::new(vec![
+            "天空之翼",
+            "90/90",
+            "精炼1阶",
+            "",
+        ]);
+
+        let result = GoodWeaponScanner::scan_single_weapon(
+            &ocr, None, &image, &scaler, &regions, &mappings, &config, 0,
+        ).unwrap();
+
+        match result {
+            WeaponScanResult::Weapon(w) => {
+                assert_eq!(w.key, "SkywardHarp");
+                assert_eq!(w.level, 90);
+                assert_eq!(w.refinement, 1);
+                assert_eq!(w.rarity, 5);
+                assert!(w.lock);
+                assert!(w.location.is_empty());
+            }
+            other => panic!("Expected Weapon, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_weapon_with_equip_location() {
+        let image = make_weapon_image(5, false);
+        let scaler = make_1080p_scaler();
+        let regions = WeaponOcrRegions::new();
+        let mappings = make_test_mappings();
+        let config = default_config();
+
+        let ocr = FakeOcr::new(vec![
+            "护摩之杖",
+            "90/90",
+            "精炼1阶",
+            "胡桃已装备",
+        ]);
+
+        let result = GoodWeaponScanner::scan_single_weapon(
+            &ocr, None, &image, &scaler, &regions, &mappings, &config, 0,
+        ).unwrap();
+
+        match result {
+            WeaponScanResult::Weapon(w) => {
+                assert_eq!(w.key, "StaffOfHoma");
+                assert_eq!(w.location, "HuTao");
+                assert!(!w.lock);
+            }
+            other => panic!("Expected Weapon, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_weapon_low_rarity_stops() {
+        let mut image = make_1080p_image();
+        paint_rarity_stars(&mut image, 2);
+        let scaler = make_1080p_scaler();
+        let regions = WeaponOcrRegions::new();
+        let mappings = make_test_mappings();
+        let config = default_config();
+
+        let ocr = FakeOcr::new(vec!["something"]);
+
+        let result = GoodWeaponScanner::scan_single_weapon(
+            &ocr, None, &image, &scaler, &regions, &mappings, &config, 0,
+        ).unwrap();
+
+        assert!(matches!(result, WeaponScanResult::Stop));
+    }
+
+    #[test]
+    fn test_weapon_unmatched_name_continue_on_failure_skips() {
+        let image = make_weapon_image(5, false);
+        let scaler = make_1080p_scaler();
+        let regions = WeaponOcrRegions::new();
+        let mappings = make_test_mappings();
+        let mut config = default_config();
+        config.continue_on_failure = true;
+
+        let ocr = FakeOcr::new(vec!["完全看不懂的名字"]);
+
+        let result = GoodWeaponScanner::scan_single_weapon(
+            &ocr, None, &image, &scaler, &regions, &mappings, &config, 0,
+        ).unwrap();
+
+        assert!(matches!(result, WeaponScanResult::Skip));
+    }
+
+    #[test]
+    fn test_weapon_unmatched_name_errors_without_continue() {
+        let image = make_weapon_image(5, false);
+        let scaler = make_1080p_scaler();
+        let regions = WeaponOcrRegions::new();
+        let mappings = make_test_mappings();
+        let config = default_config();
+
+        let ocr = FakeOcr::new(vec!["完全看不懂的名字"]);
+
+        let result = GoodWeaponScanner::scan_single_weapon(
+            &ocr, None, &image, &scaler, &regions, &mappings, &config, 0,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_weapon_equip_fallback_to_v5() {
+        let image = make_weapon_image(5, false);
+        let scaler = make_1080p_scaler();
+        let regions = WeaponOcrRegions::new();
+        let mappings = make_test_mappings();
+        let config = default_config();
+
+        let ocr = FakeOcr::new(vec![
+            "风鹰剑",
+            "80/90",
+            "精炼3阶",
+            "纳两妲已装备",
+        ]);
+        let fallback = FakeOcr::new(vec!["纳西妲已装备"]);
+
+        let result = GoodWeaponScanner::scan_single_weapon(
+            &ocr, Some(&fallback), &image, &scaler, &regions, &mappings, &config, 0,
+        ).unwrap();
+
+        match result {
+            WeaponScanResult::Weapon(w) => {
+                assert_eq!(w.key, "AquilaFavonia");
+                assert_eq!(w.location, "Nahida");
+                assert_eq!(w.level, 80);
+                assert_eq!(w.refinement, 3);
+            }
+            other => panic!("Expected Weapon, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_weapon_level_ascended() {
+        let image = make_weapon_image(5, false);
+        let scaler = make_1080p_scaler();
+        let regions = WeaponOcrRegions::new();
+        let mappings = make_test_mappings();
+        let config = default_config();
+
+        let ocr = FakeOcr::new(vec![
+            "天空之翼",
+            "80/90",
+            "精炼1阶",
+            "",
+        ]);
+
+        let result = GoodWeaponScanner::scan_single_weapon(
+            &ocr, None, &image, &scaler, &regions, &mappings, &config, 0,
+        ).unwrap();
+
+        match result {
+            WeaponScanResult::Weapon(w) => {
+                assert_eq!(w.level, 80);
+                assert_eq!(w.ascension, 6);
+            }
+            other => panic!("Expected Weapon, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+}
