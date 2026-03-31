@@ -31,7 +31,7 @@ use crate::scanner::common::models::GoodArtifact;
 pub trait ManageExecutor {
     fn execute(
         &mut self,
-        request: ArtifactManageRequest,
+        request: LockManageRequest,
         progress_fn: Option<&ProgressFn>,
         cancel_token: yas::cancel::CancelToken,
     ) -> (ManageResult, Option<Vec<GoodArtifact>>);
@@ -46,7 +46,7 @@ pub struct GameExecutor {
 impl ManageExecutor for GameExecutor {
     fn execute(
         &mut self,
-        request: ArtifactManageRequest,
+        request: LockManageRequest,
         progress_fn: Option<&ProgressFn>,
         cancel_token: yas::cancel::CancelToken,
     ) -> (ManageResult, Option<Vec<GoodArtifact>>) {
@@ -207,7 +207,7 @@ where
         Arc::new(Mutex::new(ArtifactCache::Empty));
 
     // Channel for submitting jobs from HTTP thread to execution thread
-    let (job_tx, job_rx) = mpsc::channel::<(String, ArtifactManageRequest)>();
+    let (job_tx, job_rx) = mpsc::channel::<(String, LockManageRequest)>();
 
     // Clone shared refs for the HTTP thread
     let http_state = job_state.clone();
@@ -396,9 +396,10 @@ where
                     Err(e) => {
                         error!("游戏初始化失败 / Game init failed: {}", e);
                         let mut state = job_state.lock().unwrap();
-                        let err_results: Vec<_> = request.instructions.iter().map(|i| {
+                        let total_count = request.lock.len() + request.unlock.len();
+                        let err_results: Vec<_> = (0..total_count).map(|idx| {
                             crate::manager::models::InstructionResult {
-                                id: i.id.clone(),
+                                id: format!("item_{}", idx),
                                 status: crate::manager::models::InstructionStatus::UiError,
                                 detail: Some(format!(
                                     "游戏初始化失败 / Game init failed: {}", e
@@ -433,8 +434,7 @@ where
         };
 
         // Check before request is consumed — needed for cache invalidation below
-        let has_lock_instructions = request.instructions.iter()
-            .any(|i| i.changes.lock.is_some());
+        let has_lock_instructions = !request.lock.is_empty() || !request.unlock.is_empty();
 
         let cancel_token = yas::cancel::CancelToken::new();
         let (result, artifact_snapshot) = exec.execute(request, Some(&progress_fn), cancel_token);
@@ -479,7 +479,7 @@ fn handle_manage(
     mut request: tiny_http::Request,
     enabled: &AtomicBool,
     state: &Arc<Mutex<JobState>>,
-    job_tx: &mpsc::Sender<(String, ArtifactManageRequest)>,
+    job_tx: &mpsc::Sender<(String, LockManageRequest)>,
     cors_origin: Option<&str>,
 ) {
     // Check if manager is enabled
@@ -551,7 +551,7 @@ fn handle_manage(
     }
 
     // Parse JSON
-    let manage_request: ArtifactManageRequest = match serde_json::from_str(&body) {
+    let manage_request: LockManageRequest = match serde_json::from_str(&body) {
         Ok(r) => r,
         Err(e) => {
             respond_json(
@@ -564,22 +564,23 @@ fn handle_manage(
         }
     };
 
-    if manage_request.instructions.is_empty() {
+    if manage_request.lock.is_empty() && manage_request.unlock.is_empty() {
         respond_json(
             request,
             400,
-            &format!(r#"{{"error":"{}"}}"#, yas::lang::localize("指令列表为空 / Instructions list is empty")),
+            &format!(r#"{{"error":"{}"}}"#, yas::lang::localize("lock 和 unlock 列表均为空 / Both lock and unlock lists are empty")),
             cors_origin,
         );
         return;
     }
 
-    let total = manage_request.instructions.len();
+    let total = manage_request.lock.len() + manage_request.unlock.len();
     let job_id = uuid::Uuid::new_v4().to_string();
 
     info!(
-        "[job {}] 收到 {} 条指令 / Received {} instructions",
-        job_id, total, total
+        "[job {}] 收到 {} 条管理请求（lock: {}, unlock: {}）/ Received {} manage items (lock: {}, unlock: {})",
+        job_id, total, manage_request.lock.len(), manage_request.unlock.len(),
+        total, manage_request.lock.len(), manage_request.unlock.len()
     );
 
     // Set state to Running
@@ -623,7 +624,7 @@ mod tests {
     impl ManageExecutor for FakeExecutor {
         fn execute(
             &mut self,
-            _request: ArtifactManageRequest,
+            _request: LockManageRequest,
             _progress_fn: Option<&ProgressFn>,
             _cancel_token: yas::cancel::CancelToken,
         ) -> (ManageResult, Option<Vec<GoodArtifact>>) {
@@ -673,16 +674,13 @@ mod tests {
     }
 
     fn make_manage_body(ids: &[&str]) -> String {
-        let instructions: Vec<String> = ids
+        let artifacts: Vec<String> = ids
             .iter()
-            .map(|id| {
-                format!(
-                    r#"{{"id":"{}","target":{{"setKey":"GladiatorsFinale","slotKey":"flower","rarity":5,"level":20,"mainStatKey":"hp","substats":[]}},"changes":{{"lock":true}}}}"#,
-                    id
-                )
+            .map(|_id| {
+                r#"{"setKey":"GladiatorsFinale","slotKey":"flower","rarity":5,"level":20,"mainStatKey":"hp","substats":[],"location":"","lock":false,"astralMark":false,"elixirCrafted":false,"unactivatedSubstats":[]}"#.to_string()
             })
             .collect();
-        format!(r#"{{"instructions":[{}]}}"#, instructions.join(","))
+        format!(r#"{{"lock":[{}]}}"#, artifacts.join(","))
     }
 
     static NEXT_PORT: AtomicU16 = AtomicU16::new(19100);
@@ -896,7 +894,7 @@ mod tests {
         let resp = client
             .post(format!("http://127.0.0.1:{}/manage", port))
             .header("Content-Type", "application/json")
-            .body(r#"{"instructions":[]}"#)
+            .body(r#"{"lock":[],"unlock":[]}"#)
             .send()
             .unwrap();
         assert_eq!(resp.status().as_u16(), 400);

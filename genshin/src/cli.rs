@@ -47,8 +47,8 @@ const ORT_DLL_NAME: &str = "onnxruntime.dll";
 /// Mirror URLs to try in order. CDN proxies first (fast globally), GitHub direct last.
 #[cfg(target_os = "windows")]
 const ORT_DOWNLOAD_URLS: &[&str] = &[
-    "https://ghfast.top/https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip",
     "https://gh-proxy.com/https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip",
+    "https://ghfast.top/https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip",
     "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip",
 ];
 
@@ -989,13 +989,14 @@ impl GoodScannerApplication {
         let init_executor = move || -> anyhow::Result<Box<dyn crate::server::ManageExecutor>> {
             let game_info = Self::get_game_info()?;
             let ctrl = GenshinGameController::new(game_info)?;
-            let mut manager = crate::manager::orchestrator::ArtifactManager::new(
+            let manager = crate::manager::orchestrator::ArtifactManager::new(
                 mappings,
                 ocr_backend,
                 substat_ocr_backend,
+                grid_delay,
+                scroll_delay,
+                false,
             );
-            manager.delay_grid_item = grid_delay;
-            manager.delay_scroll = scroll_delay;
             Ok(Box::new(crate::server::GameExecutor { ctrl, manager }))
         };
 
@@ -1329,14 +1330,14 @@ pub fn run_server_core(
     let init_executor = move || -> anyhow::Result<Box<dyn crate::server::ManageExecutor>> {
         let game_info = GoodScannerApplication::get_game_info()?;
         let ctrl = GenshinGameController::new(game_info)?;
-        let mut manager = crate::manager::orchestrator::ArtifactManager::new(
+        let manager = crate::manager::orchestrator::ArtifactManager::new(
             mappings_clone,
             ocr_be,
             substat_ocr,
+            grid_delay,
+            scroll_delay,
+            stop_on_all_matched,
         );
-        manager.delay_grid_item = grid_delay;
-        manager.delay_scroll = scroll_delay;
-        manager.stop_on_all_matched = stop_on_all_matched;
         Ok(Box::new(crate::server::GameExecutor { ctrl, manager }))
     };
 
@@ -1358,13 +1359,15 @@ pub fn run_manage_json(
         }
     }
 
-    let request: crate::manager::models::ArtifactManageRequest =
+    let request: crate::manager::models::LockManageRequest =
         serde_json::from_str(json_str)
             .map_err(|e| anyhow!("JSON解析失败 / JSON parse error: {}", e))?;
 
+    let total = request.lock.len() + request.unlock.len();
     info!(
-        "执行 {} 条管理指令 / Executing {} manage instructions",
-        request.instructions.len(), request.instructions.len()
+        "执行 {} 条管理请求（lock: {}, unlock: {}）/ Executing {} manage items (lock: {}, unlock: {})",
+        total, request.lock.len(), request.unlock.len(),
+        total, request.lock.len(), request.unlock.len()
     );
 
     let overrides = user_config.to_overrides();
@@ -1375,13 +1378,14 @@ pub fn run_manage_json(
     let token = cancel_token.unwrap_or_else(yas::cancel::CancelToken::new);
 
     let ocr_be = ocr_backend.unwrap_or("ppocrv5").to_string();
-    let mut manager = crate::manager::orchestrator::ArtifactManager::new(
+    let manager = crate::manager::orchestrator::ArtifactManager::new(
         mappings,
         ocr_be,
         artifact_substat_ocr.to_string(),
+        user_config.artifact_grid_delay,
+        user_config.artifact_scroll_delay,
+        false,
     );
-    manager.delay_grid_item = user_config.artifact_grid_delay;
-    manager.delay_scroll = user_config.artifact_scroll_delay;
 
     let (result, _artifact_snapshot) = manager.execute(&mut ctrl, request, None, token);
     Ok(result)
