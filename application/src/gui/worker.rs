@@ -9,6 +9,8 @@ pub struct TaskHandle {
     _handle: JoinHandle<()>,
     /// Optional shutdown flag — set to true to request graceful stop.
     shutdown: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Optional cancel token for scan operations.
+    cancel_token: Option<yas::cancel::CancelToken>,
 }
 
 impl TaskHandle {
@@ -20,6 +22,9 @@ impl TaskHandle {
     pub fn stop(&self) {
         if let Some(ref flag) = self.shutdown {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(ref token) = self.cancel_token {
+            token.cancel(yas::cancel::StopReason::UserAbort);
         }
     }
 }
@@ -47,8 +52,8 @@ pub fn spawn_scan(state: &AppState) -> TaskHandle {
     let scan_config = state.to_scan_config();
     let lang = state.lang;
 
-    // Reset abort flag for new scan
-    yas::utils::reset_abort();
+    let token = yas::cancel::CancelToken::new();
+    let stop_token = token.clone();
     *status.lock().unwrap() = TaskStatus::Running(
         lang.t("正在初始化...", "Initializing...").into(),
     );
@@ -90,7 +95,7 @@ pub fn spawn_scan(state: &AppState) -> TaskHandle {
                 *status_for_cb.lock().unwrap() = TaskStatus::Running(display);
             };
 
-            match yas_genshin::cli::run_scan_core(&user_config, &scan_config, Some(&status_fn)) {
+            match yas_genshin::cli::run_scan_core(&user_config, &scan_config, Some(&status_fn), Some(token)) {
                 Ok(path) => {
                     let msg = match lang {
                         Lang::Zh => format!("已导出至 {}", path),
@@ -113,7 +118,7 @@ pub fn spawn_scan(state: &AppState) -> TaskHandle {
         }
     });
 
-    TaskHandle { _handle: handle, shutdown: None }
+    TaskHandle { _handle: handle, shutdown: None, cancel_token: Some(stop_token) }
 }
 
 /// Spawn the HTTP server on a background thread.
@@ -168,7 +173,7 @@ pub fn spawn_server(state: &AppState) -> TaskHandle {
         }
     });
 
-    TaskHandle { _handle: handle, shutdown: Some(shutdown) }
+    TaskHandle { _handle: handle, shutdown: Some(shutdown), cancel_token: None }
 }
 
 /// Spawn manage-from-JSON on a background thread.
@@ -226,5 +231,5 @@ pub fn spawn_manage_json(
         }
     });
 
-    TaskHandle { _handle: handle, shutdown: None }
+    TaskHandle { _handle: handle, shutdown: None, cancel_token: None }
 }

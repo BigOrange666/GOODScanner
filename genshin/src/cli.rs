@@ -694,6 +694,8 @@ impl GoodScannerApplication {
         debug!("云游戏 / cloud: {}", game_info.is_cloud);
 
         let mut ctrl = GenshinGameController::new(game_info)?;
+        let token = yas::cancel::CancelToken::new();
+        ctrl.set_cancel_token(token.clone());
         ctrl.focus_game_window();
 
         let mut characters = None;
@@ -722,13 +724,13 @@ impl GoodScannerApplication {
             info!("已扫描 / Scanned {} characters", result.len());
             characters = Some(result);
 
-            if !yas::utils::was_aborted() {
+            if !token.is_cancelled() {
                 ctrl.return_to_main_ui(4);
             }
         }
 
         // Scan weapons
-        if scan_weapons && !yas::utils::was_aborted() {
+        if scan_weapons && !token.is_cancelled() {
             info!("=== 扫描武器 / Scanning weapons ===");
             let weapon_config = Self::make_weapon_config(&config, &user_config);
             let scanner = GoodWeaponScanner::new(
@@ -746,7 +748,7 @@ impl GoodScannerApplication {
         }
 
         // Scan artifacts
-        if scan_artifacts && !yas::utils::was_aborted() {
+        if scan_artifacts && !token.is_cancelled() {
             info!("=== 扫描圣遗物 / Scanning artifacts ===");
             let artifact_config = Self::make_artifact_config(&config, &user_config);
             let skip_open = scan_weapons;
@@ -764,7 +766,7 @@ impl GoodScannerApplication {
             artifacts = Some(result);
         }
 
-        if yas::utils::was_aborted() {
+        if token.is_cancelled() {
             info!("扫描被用户中断 / Scan aborted by user (right-click)");
         }
 
@@ -833,6 +835,8 @@ impl GoodScannerApplication {
         let overrides = user_config.to_overrides();
         let mappings = Arc::new(MappingManager::new(&overrides)?);
         let mut ctrl = GenshinGameController::new(game_info)?;
+        let token = yas::cancel::CancelToken::new();
+        ctrl.set_cancel_token(token.clone());
         ctrl.focus_game_window();
 
         let ocr_backend = config.ocr_backend.as_deref().unwrap_or("ppocrv4");
@@ -857,7 +861,7 @@ impl GoodScannerApplication {
 
                 let max_iter = if config.debug_rescan_count == 0 { usize::MAX } else { config.debug_rescan_count };
                 for i in 0..max_iter {
-                    if yas::utils::is_rmb_down() {
+                    if token.check_rmb() {
                         info!("[rescan] 用户中断 / interrupted by user");
                         break;
                     }
@@ -908,7 +912,7 @@ impl GoodScannerApplication {
                         let scanner = GoodWeaponScanner::new(weapon_config, mappings.clone())?;
 
                         for i in 0..max_iter {
-                            if yas::utils::is_rmb_down() {
+                            if token.check_rmb() {
                                 info!("[rescan] 用户中断 / interrupted by user");
                                 break;
                             }
@@ -929,7 +933,7 @@ impl GoodScannerApplication {
                         let scanner = GoodArtifactScanner::new(artifact_config, mappings.clone())?;
 
                         for i in 0..max_iter {
-                            if yas::utils::is_rmb_down() {
+                            if token.check_rmb() {
                                 info!("[rescan] 用户中断 / interrupted by user");
                                 break;
                             }
@@ -1187,6 +1191,7 @@ pub fn run_scan_core(
     user_config: &GoodUserConfig,
     config: &ScanCoreConfig,
     status_fn: Option<&dyn Fn(&str)>,
+    cancel_token: Option<yas::cancel::CancelToken>,
 ) -> Result<String> {
     let report = |msg: &str| {
         if let Some(f) = status_fn { f(msg); }
@@ -1217,6 +1222,8 @@ pub fn run_scan_core(
     report("查找游戏窗口 / Finding game window...");
     let game_info = GoodScannerApplication::get_game_info()?;
     let mut ctrl = GenshinGameController::new(game_info)?;
+    let token = cancel_token.unwrap_or_else(yas::cancel::CancelToken::new);
+    ctrl.set_cancel_token(token.clone());
     ctrl.focus_game_window();
 
     let mut characters = None;
@@ -1233,13 +1240,13 @@ pub fn run_scan_core(
         info!("已扫描 / Scanned {} characters", result.len());
         characters = Some(result);
 
-        if !yas::utils::was_aborted() {
+        if !token.is_cancelled() {
             ctrl.return_to_main_ui(4);
         }
     }
 
     // Scan weapons
-    if config.scan_weapons && !yas::utils::was_aborted() {
+    if config.scan_weapons && !token.is_cancelled() {
         report("扫描武器 / Scanning weapons...");
         info!("=== 扫描武器 / Scanning weapons ===");
         let weapon_config = GoodScannerApplication::make_weapon_config(&scanner_config, user_config);
@@ -1250,7 +1257,7 @@ pub fn run_scan_core(
     }
 
     // Scan artifacts
-    if config.scan_artifacts && !yas::utils::was_aborted() {
+    if config.scan_artifacts && !token.is_cancelled() {
         report("扫描圣遗物 / Scanning artifacts...");
         info!("=== 扫描圣遗物 / Scanning artifacts ===");
         let artifact_config = GoodScannerApplication::make_artifact_config(&scanner_config, user_config);
@@ -1261,7 +1268,7 @@ pub fn run_scan_core(
         artifacts = Some(result);
     }
 
-    if yas::utils::was_aborted() {
+    if token.is_cancelled() {
         info!("扫描被用户中断 / Scan aborted by user (right-click)");
     }
 
@@ -1364,6 +1371,8 @@ pub fn run_manage_json(
 
     let game_info = GoodScannerApplication::get_game_info()?;
     let mut ctrl = GenshinGameController::new(game_info)?;
+    let token = yas::cancel::CancelToken::new();
+    ctrl.set_cancel_token(token.clone());
 
     let ocr_be = ocr_backend.unwrap_or("ppocrv5").to_string();
     let mut manager = crate::manager::orchestrator::ArtifactManager::new(

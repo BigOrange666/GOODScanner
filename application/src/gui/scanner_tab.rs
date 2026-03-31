@@ -211,7 +211,9 @@ fn action_bar(
     ui.horizontal(|ui| {
         if is_scanning {
             if ui.button(l.t("⏹ 停止扫描", "⏹ Stop Scan")).clicked() {
-                yas::utils::set_abort();
+                if let Some(ref handle) = scan_handle {
+                    handle.stop();
+                }
             }
             let status = state.scan_status.lock().unwrap().clone();
             if let TaskStatus::Running(phase) = status {
