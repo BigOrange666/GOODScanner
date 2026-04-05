@@ -4,21 +4,13 @@ use eframe::egui;
 
 use super::state::{AppState, Lang};
 
-/// Numeric text input for u64 values (no drag behavior, clamped to 5000).
-pub fn num_input_u64(ui: &mut egui::Ui, value: &mut u64, width: f32) {
-    let mut buf = value.to_string();
-    let response = ui.add(
-        egui::TextEdit::singleline(&mut buf)
-            .desired_width(width)
-            .horizontal_align(egui::Align::RIGHT),
+/// Numeric input for u64 values (clamped to 5000).
+pub fn num_input_u64(ui: &mut egui::Ui, value: &mut u64, _width: f32) {
+    ui.add(
+        egui::DragValue::new(value)
+            .range(0..=5000)
+            .speed(0.0),
     );
-    if response.changed() {
-        if let Ok(v) = buf.parse::<u64>() {
-            *value = v.min(5000);
-        } else if buf.is_empty() {
-            *value = 0;
-        }
-    }
 }
 
 /// A labeled group of delay fields rendered in a 2-column grid.

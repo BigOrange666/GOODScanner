@@ -176,18 +176,10 @@ fn action_bar(
 }
 
 fn max_count_field(ui: &mut egui::Ui, value: &mut usize) {
-    let mut buf = value.to_string();
-    let response = ui.add(
-        egui::TextEdit::singleline(&mut buf)
-            .desired_width(40.0)
-            .horizontal_align(egui::Align::RIGHT),
+    ui.add(
+        egui::DragValue::new(value)
+            .range(0..=2000)
+            .speed(0.0),
     );
-    if response.changed() {
-        if let Ok(v) = buf.parse::<usize>() {
-            *value = v.min(2000);
-        } else if buf.is_empty() {
-            *value = 0;
-        }
-    }
 }
 

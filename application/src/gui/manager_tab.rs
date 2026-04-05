@@ -104,17 +104,12 @@ fn action_bar(
 
     ui.horizontal(|ui| {
         ui.label(l.t("端口:", "Port:"));
-        let mut port_buf = state.server_port.to_string();
-        let port_edit = egui::TextEdit::singleline(&mut port_buf)
-            .desired_width(50.0)
-            .horizontal_align(egui::Align::RIGHT);
-        if ui.add_enabled(!is_server_running, port_edit).changed() {
-            if let Ok(v) = port_buf.parse::<u16>() {
-                if v >= 1024 {
-                    state.server_port = v;
-                }
-            }
-        }
+        ui.add_enabled(
+            !is_server_running,
+            egui::DragValue::new(&mut state.server_port)
+                .range(1024..=65535)
+                .speed(0.0),
+        );
 
         ui.add_space(12.0);
 
