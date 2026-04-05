@@ -19,7 +19,7 @@ use crate::scanner::common::grid_icon_detector::{GridIconResult, GridPageDetecti
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::{DebugOcrField, DebugScanResult, GoodArtifact, GoodSubStat};
 use crate::scanner::common::ocr_factory;
-use crate::scanner::common::ocr_pool::OcrPool;
+use crate::scanner::common::ocr_pool::SharedOcrPools;
 use crate::scanner::common::pixel_utils;
 use crate::scanner::common::scan_worker::{self, WorkItem};
 use crate::scanner::common::roll_solver::{self, OcrCandidate, SolverInput};
@@ -1165,18 +1165,19 @@ impl GoodArtifactScanner {
         ctrl: &mut GenshinGameController,
         skip_open_backpack: bool,
         start_at: usize,
+        pools: &SharedOcrPools,
     ) -> Result<Vec<GoodArtifact>> {
         debug!("[artifact] 开始扫描... / [artifact] starting scan...");
         let now = SystemTime::now();
 
-        // Create a temporary OCR model just for reading item count
-        let count_ocr = ocr_factory::create_ocr_model(&self.config.ocr_backend)?;
+        // Borrow a model from the v5 pool for reading item count
+        let count_ocr_guard = pools.v5().get();
 
         let total_count = if !skip_open_backpack {
             // Use shared opening sequence (focus → main UI → open → tab → count with retry)
             let (count, _) = backpack_scanner::open_backpack_to_tab(
                 ctrl, "artifact", self.config.open_delay, self.config.delay_tab,
-                count_ocr.as_ref(),
+                &count_ocr_guard,
             )?;
             count
         } else {
@@ -1187,9 +1188,12 @@ impl GoodArtifactScanner {
             }
             backpack_scanner::dismiss_five_star_filter(ctrl, self.config.delay_tab, self.config.dump_images);
             let bp = BackpackScanner::new(ctrl);
-            let (count, _) = bp.read_item_count(count_ocr.as_ref())?;
+            let (count, _) = bp.read_item_count(&count_ocr_guard)?;
             count
         };
+
+        // Return count OCR model to pool before scan loop
+        drop(count_ocr_guard);
 
         let mut bp = BackpackScanner::new(ctrl);
 
@@ -1210,30 +1214,12 @@ impl GoodArtifactScanner {
         // Clone scaler so callback doesn't conflict with BackpackScanner's borrow
         let scaler = bp.scaler().clone();
 
-        // Create OCR pools with multiple model instances for parallel OCR.
-        //
-        // Two separate pools are required because each worker checks out from BOTH pools
-        // simultaneously — sharing one pool causes deadlock.
-        //
-        // Pool roles (based on systematic eval — v4 dominates on all fields except level):
-        //   ocr_pool       = "level engine" (v5) — only for level OCR + equip/substat fallback
-        //   substat_pool   = "general engine" (v4) — name, main stat, set, equip, substats
-        //
-        // v5 pool is the bottleneck for max parallelism (each worker holds both).
-        // 2 v5 instances → max 2 concurrent scans. 5 v4 instances allows
-        // scheduling slack when v5 is returned before v4.
-        let ocr_backend = self.config.ocr_backend.clone();
-        let ocr_pool = Arc::new(OcrPool::new(
-            move || ocr_factory::create_ocr_model(&ocr_backend),
-            2,
-        )?);
-        let substat_backend = self.config.substat_ocr_backend.clone();
-        let substat_ocr_pool = Arc::new(OcrPool::new(
-            move || ocr_factory::create_ocr_model(&substat_backend),
-            5,
-        )?);
-        debug!("[artifact] OCR池: v5(等级)=2, v4(通用)=5 (level_engine={}, general_engine={}) / [artifact] OCR pool: v5(level)=2, v4(general)=5 (level_engine={}, general_engine={})",
-            self.config.ocr_backend, self.config.substat_ocr_backend, self.config.ocr_backend, self.config.substat_ocr_backend);
+        // Use shared OCR pools (v5 for level, v4 for everything else).
+        let ocr_pool = pools.v5().clone();
+        let substat_ocr_pool = pools.v4().clone();
+        debug!("[artifact] 使用共享OCR池: v5(等级)={}, v4(通用)={} / [artifact] using shared OCR pools: v5(level)={}, v4(general)={}",
+            pools.config().v5_count, pools.config().v4_count,
+            pools.config().v5_count, pools.config().v4_count);
 
         // Shared context for worker threads
         let worker_mappings = self.mappings.clone();

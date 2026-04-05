@@ -14,8 +14,7 @@ use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::grid_icon_detector::GridPageDetection;
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::GoodArtifact;
-use crate::scanner::common::ocr_factory;
-use crate::scanner::common::ocr_pool::OcrPool;
+use crate::scanner::common::ocr_pool::SharedOcrPools;
 use crate::scanner::common::pixel_utils;
 
 use super::matching;
@@ -34,8 +33,9 @@ use super::ui_actions;
 /// 当检测到稀有度 < 4 时，完成当前页后停止扫描。
 pub struct LockManager {
     mappings: Arc<MappingManager>,
-    ocr_backend: String,
-    substat_ocr_backend: String,
+    pools: Arc<SharedOcrPools>,
+    #[allow(dead_code)]
+    dump_images: bool,
 }
 
 /// An artifact identified on the current page that needs a lock toggle.
@@ -57,10 +57,10 @@ const PANEL_POOL_RECT: (f64, f64, f64, f64) = (1400.0, 300.0, 300.0, 200.0);
 impl LockManager {
     pub fn new(
         mappings: Arc<MappingManager>,
-        ocr_backend: String,
-        substat_ocr_backend: String,
+        pools: Arc<SharedOcrPools>,
+        dump_images: bool,
     ) -> Self {
-        Self { mappings, ocr_backend, substat_ocr_backend }
+        Self { mappings, pools, dump_images }
     }
 
     /// Execute lock change targets by scanning the artifact backpack.
@@ -95,63 +95,22 @@ impl LockManager {
             }).collect()
         };
 
-        // Create OCR pools (same sizes as artifact scanner: 2 main + 5 substat)
-        let ocr_backend = self.ocr_backend.clone();
-        let ocr_pool = match OcrPool::new(
-            move || ocr_factory::create_ocr_model(&ocr_backend),
-            2,
-        ) {
-            Ok(p) => Arc::new(p),
-            Err(e) => {
-                warn!("OCR模型创建失败 / OCR model creation failed: {}", e);
-                return (
-                    make_error_results(targets, InstructionStatus::OcrError),
-                    scanned_artifacts,
-                    HashMap::new(),
-                    false,
-                );
-            }
-        };
-        let substat_backend = self.substat_ocr_backend.clone();
-        let substat_pool = match OcrPool::new(
-            move || ocr_factory::create_ocr_model(&substat_backend),
-            5,
-        ) {
-            Ok(p) => Arc::new(p),
-            Err(e) => {
-                warn!("副属性OCR模型创建失败 / Substat OCR model creation failed: {}", e);
-                return (
-                    make_error_results(targets, InstructionStatus::OcrError),
-                    scanned_artifacts,
-                    HashMap::new(),
-                    false,
-                );
-            }
-        };
-        // Single model for count OCR (used once during backpack open)
-        let count_ocr = match ocr_factory::create_ocr_model(&self.ocr_backend) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("OCR模型创建失败 / OCR model creation failed: {}", e);
-                return (
-                    make_error_results(targets, InstructionStatus::OcrError),
-                    scanned_artifacts,
-                    HashMap::new(),
-                    false,
-                );
-            }
-        };
-
         if targets.is_empty() {
             return (Vec::new(), scanned_artifacts, HashMap::new(), false);
         }
+
+        // Use shared OCR pools (v5 for level, v4 for everything else).
+        let ocr_pool = self.pools.v5().clone();
+        let substat_pool = self.pools.v4().clone();
+        // Borrow a model from the v5 pool for reading item count
+        let count_ocr_guard = ocr_pool.get();
 
         // Track which targets have been matched (target vec index -> scanned artifact index)
         let mut matched: HashMap<usize, usize> = HashMap::new();
 
         // --- Open backpack to artifact tab (same as artifact scanner) ---
         let total = match backpack_scanner::open_backpack_to_tab(
-            ctrl, "artifact", 1200, 400, count_ocr.as_ref(),
+            ctrl, "artifact", 1200, 400, &count_ocr_guard,
         ) {
             Ok((count, _max)) => {
                 info!("[lock_manager] 共 {} 个圣遗物 / {} artifacts total", count, count);
@@ -180,6 +139,9 @@ impl LockManager {
                 true, // empty backpack is a "complete" scan
             );
         }
+
+        // Return count OCR model to pool before scan loop
+        drop(count_ocr_guard);
 
         let scaler = ctrl.scaler.clone();
         let total_rows = (total + GRID_COLS - 1) / GRID_COLS;

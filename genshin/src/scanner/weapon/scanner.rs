@@ -26,8 +26,7 @@ lazy_static::lazy_static! {
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::{DebugOcrField, DebugScanResult, GoodWeapon};
-use crate::scanner::common::ocr_factory;
-use crate::scanner::common::ocr_pool::OcrPool;
+use crate::scanner::common::ocr_pool::SharedOcrPools;
 use crate::scanner::common::pixel_utils;
 use crate::scanner::common::scan_worker::{self, WorkItem};
 use crate::scanner::common::stat_parser::level_to_ascension;
@@ -394,6 +393,7 @@ impl GoodWeaponScanner {
         ctrl: &mut GenshinGameController,
         skip_open_backpack: bool,
         start_at: usize,
+        pools: &SharedOcrPools,
     ) -> Result<Vec<GoodWeapon>> {
         debug!("[weapon] 开始扫描... / [weapon] starting scan...");
         let now = SystemTime::now();
@@ -417,9 +417,9 @@ impl GoodWeaponScanner {
         bp.select_tab("weapon", self.config.delay_tab);
         if cancel.check_rmb() { anyhow::bail!("cancelled"); }
 
-        // Create a temporary OCR model just for reading item count
-        let count_ocr = ocr_factory::create_ocr_model(&self.config.ocr_backend)?;
-        let (current_count, _max_capacity) = bp.read_item_count(count_ocr.as_ref())?;
+        // Borrow a model from the v4 pool for reading item count
+        let count_ocr_guard = pools.v4().get();
+        let (current_count, _max_capacity) = bp.read_item_count(&count_ocr_guard)?;
 
         // If count is 0, try reopening backpack
         let total_count = if current_count == 0 {
@@ -431,7 +431,7 @@ impl GoodWeaponScanner {
             let mut bp2 = BackpackScanner::new(ctrl);
             bp2.open_backpack(self.config.open_delay);
             bp2.select_tab("weapon", self.config.delay_tab);
-            let (count, _) = bp2.read_item_count(count_ocr.as_ref())?;
+            let (count, _) = bp2.read_item_count(&count_ocr_guard)?;
             drop(bp2);
             bp = BackpackScanner::new(ctrl);
             count
@@ -455,20 +455,12 @@ impl GoodWeaponScanner {
 
         let scaler = bp.scaler().clone();
 
-        // Create OCR pools.
-        // Weapon scanner uses a single engine (v4) for all fields.
-        // 4 instances for parallel scanning.
-        // 1 v5 instance for equip fallback (v4 dict lacks rare chars like 魈/Xiao).
-        let ocr_backend = self.config.ocr_backend.clone();
-        let ocr_pool = Arc::new(OcrPool::new(
-            move || ocr_factory::create_ocr_model(&ocr_backend),
-            4,
-        )?);
-        let equip_fallback_pool = Arc::new(OcrPool::new(
-            || ocr_factory::create_ocr_model("ppocrv5"),
-            1,
-        )?);
-        debug!("[weapon] OCR池: v4=4, 装备回退(v5)=1 / [weapon] OCR pool: v4=4, equip_fallback(v5)=1");
+        // Return count OCR model to pool before scan loop
+        drop(count_ocr_guard);
+
+        // Use shared OCR pools (v4 for primary, v5 for equip fallback).
+        let ocr_pool = pools.v4().clone();
+        let equip_fallback_pool = pools.v5().clone();
 
         // Shared context for worker threads
         let worker_mappings = self.mappings.clone();

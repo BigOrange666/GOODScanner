@@ -18,6 +18,7 @@ use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::{MappingManager, NameOverrides};
 use crate::scanner::common::models::{DebugScanResult, GoodExport};
 use crate::scanner::common::ocr_factory;
+use crate::scanner::common::ocr_pool::{OcrPoolConfig, SharedOcrPools};
 use crate::scanner::weapon::{GoodWeaponScanner, GoodWeaponScannerConfig};
 
 /// Config file path relative to the executable directory.
@@ -196,6 +197,39 @@ fn default_mgr_action() -> u64 { 800 }
 fn default_mgr_cell() -> u64 { 100 }
 fn default_mgr_scroll() -> u64 { 400 }
 
+/// Deserialize a u64 that may arrive as a number, a numeric string, or an
+/// empty/invalid string.  Non-numeric values silently fall back to 0 so that
+/// `#[serde(default = "…")]` can supply the real default.
+fn deserialize_u64_lenient<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct U64LenientVisitor;
+
+    impl<'de> de::Visitor<'de> for U64LenientVisitor {
+        type Value = u64;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a u64 or a numeric string")
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<u64, E> { Ok(v) }
+        fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<u64, E> { Ok(v.max(0) as u64) }
+        fn visit_f64<E: de::Error>(self, v: f64) -> std::result::Result<u64, E> { Ok(v.max(0.0) as u64) }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<u64, E> {
+            Ok(v.trim().parse::<u64>().unwrap_or(0))
+        }
+
+        fn visit_none<E: de::Error>(self) -> std::result::Result<u64, E> { Ok(0) }
+        fn visit_unit<E: de::Error>(self) -> std::result::Result<u64, E> { Ok(0) }
+    }
+
+    deserializer.deserialize_any(U64LenientVisitor)
+}
+
 fn is_default_char_tab_delay(v: &u64) -> bool { *v <= DEFAULT_DELAY_CHAR_TAB_SWITCH }
 fn is_default_char_next_delay(v: &u64) -> bool { *v <= DEFAULT_DELAY_CHAR_NEXT }
 fn is_default_open_delay(v: &u64) -> bool { *v <= DEFAULT_DELAY_OPEN_SCREEN }
@@ -259,38 +293,38 @@ pub struct GoodUserConfig {
     // Only serialized when user set a value higher than default.
     // On load, values at or below default are clamped up to default.
 
-    #[serde(default = "default_char_tab_delay", skip_serializing_if = "is_default_char_tab_delay")]
+    #[serde(default = "default_char_tab_delay", skip_serializing_if = "is_default_char_tab_delay", deserialize_with = "deserialize_u64_lenient")]
     pub char_tab_delay: u64,
-    #[serde(default = "default_char_next_delay", skip_serializing_if = "is_default_char_next_delay")]
+    #[serde(default = "default_char_next_delay", skip_serializing_if = "is_default_char_next_delay", deserialize_with = "deserialize_u64_lenient")]
     pub char_next_delay: u64,
-    #[serde(default = "default_open_delay", skip_serializing_if = "is_default_open_delay")]
+    #[serde(default = "default_open_delay", skip_serializing_if = "is_default_open_delay", deserialize_with = "deserialize_u64_lenient")]
     pub char_open_delay: u64,
-    #[serde(default = "default_close_delay", skip_serializing_if = "is_default_close_delay")]
+    #[serde(default = "default_close_delay", skip_serializing_if = "is_default_close_delay", deserialize_with = "deserialize_u64_lenient")]
     pub char_close_delay: u64,
 
-    #[serde(default = "default_scroll_delay", skip_serializing_if = "is_default_scroll_delay", alias = "weapon_scroll_delay", alias = "artifact_scroll_delay")]
+    #[serde(default = "default_scroll_delay", skip_serializing_if = "is_default_scroll_delay", deserialize_with = "deserialize_u64_lenient", alias = "weapon_scroll_delay", alias = "artifact_scroll_delay")]
     pub inv_scroll_delay: u64,
-    #[serde(default = "default_tab_delay", skip_serializing_if = "is_default_tab_delay", alias = "weapon_tab_delay", alias = "artifact_tab_delay")]
+    #[serde(default = "default_tab_delay", skip_serializing_if = "is_default_tab_delay", deserialize_with = "deserialize_u64_lenient", alias = "weapon_tab_delay", alias = "artifact_tab_delay")]
     pub inv_tab_delay: u64,
-    #[serde(default = "default_open_delay", skip_serializing_if = "is_default_open_delay", alias = "weapon_open_delay", alias = "artifact_open_delay")]
+    #[serde(default = "default_open_delay", skip_serializing_if = "is_default_open_delay", deserialize_with = "deserialize_u64_lenient", alias = "weapon_open_delay", alias = "artifact_open_delay")]
     pub inv_open_delay: u64,
 
     /// Delay (ms) after panel load detection, before screen capture for OCR.
-    #[serde(default = "default_capture_delay", skip_serializing_if = "is_default_capture_delay")]
+    #[serde(default = "default_capture_delay", skip_serializing_if = "is_default_capture_delay", deserialize_with = "deserialize_u64_lenient")]
     pub capture_delay: u64,
 
     // --- Manager delay settings ---
     /// Screen transition delay for the manager (ms). Default: 1500.
-    #[serde(default = "default_mgr_transition")]
+    #[serde(default = "default_mgr_transition", deserialize_with = "deserialize_u64_lenient")]
     pub mgr_transition_delay: u64,
     /// Action button delay for the manager (ms). Default: 800.
-    #[serde(default = "default_mgr_action")]
+    #[serde(default = "default_mgr_action", deserialize_with = "deserialize_u64_lenient")]
     pub mgr_action_delay: u64,
     /// Grid cell click delay for the manager (ms). Default: 100.
-    #[serde(default = "default_mgr_cell")]
+    #[serde(default = "default_mgr_cell", deserialize_with = "deserialize_u64_lenient")]
     pub mgr_cell_delay: u64,
     /// Scroll settle delay for the manager (ms). Default: 400.
-    #[serde(default = "default_mgr_scroll")]
+    #[serde(default = "default_mgr_scroll", deserialize_with = "deserialize_u64_lenient")]
     pub mgr_scroll_delay: u64,
 
     /// GUI language preference: "zh" or "en".
@@ -427,16 +461,18 @@ fn load_or_create_config() -> Result<GoodUserConfig> {
     }
 
     let contents = std::fs::read_to_string(&path)?;
-    let config: GoodUserConfig = serde_json::from_str(&contents)
+    // Parse as generic JSON first so we can sanitize invalid field types
+    // (e.g. empty strings in u64 fields from old config versions).
+    let mut val: serde_json::Value = serde_json::from_str(&contents)
         .map_err(|e| anyhow!("配置解析失败 / Failed to parse {}: {}", path.display(), e))?;
+    sanitize_config_json(&mut val);
+    let mut config: GoodUserConfig = serde_json::from_value(val)
+        .map_err(|e| anyhow!("配置解析失败 / Failed to parse {}: {}", path.display(), e))?;
+    config.normalize_delays();
     debug!("已加载配置 / Loaded config from {}", path.display());
 
-    // Re-save to add any new default fields that didn't exist in the old file
-    let updated_json = serde_json::to_string_pretty(&config)?;
-    if updated_json != contents {
-        let _ = std::fs::write(&path, &updated_json);
-        debug!("配置已更新（添加了新的默认字段） / Config updated with new default fields");
-    }
+    // Re-save to strip invalid/default entries and add any new default fields
+    let _ = save_config(&config);
 
     Ok(config)
 }
@@ -748,6 +784,13 @@ impl GoodScannerApplication {
             debug!("OCR后端覆盖 / OCR backend override: {}", backend);
         }
 
+        // Create shared OCR pools for all scanners
+
+        let pool_config = OcrPoolConfig::detect();
+        let ocr_backend = config.ocr_backend.as_deref().unwrap_or("ppocrv5");
+        let substat_backend = config.artifact_substat_ocr.as_str();
+        let pools = SharedOcrPools::new(pool_config, ocr_backend, substat_backend)?;
+
         // Scan characters
         if scan_characters {
             info!("=== 扫描角色 / Scanning characters ===");
@@ -756,7 +799,7 @@ impl GoodScannerApplication {
                 char_config, mappings.clone(),
             )?;
             let t = Instant::now();
-            let result = scanner.scan(&mut ctrl, config.debug_char_index)?;
+            let result = scanner.scan(&mut ctrl, config.debug_char_index, &pools)?;
             if config.debug_timing {
                 let elapsed = t.elapsed();
                 let avg = if result.is_empty() { 0 } else { elapsed.as_millis() as usize / result.len() };
@@ -778,7 +821,7 @@ impl GoodScannerApplication {
                 weapon_config, mappings.clone(),
             )?;
             let t = Instant::now();
-            let result = scanner.scan(&mut ctrl, false, config.debug_start_at)?;
+            let result = scanner.scan(&mut ctrl, false, config.debug_start_at, &pools)?;
             if config.debug_timing {
                 let elapsed = t.elapsed();
                 let avg = if result.is_empty() { 0 } else { elapsed.as_millis() as usize / result.len() };
@@ -797,7 +840,7 @@ impl GoodScannerApplication {
                 artifact_config, mappings.clone(),
             )?;
             let t = Instant::now();
-            let result = scanner.scan(&mut ctrl, skip_open, config.debug_start_at)?;
+            let result = scanner.scan(&mut ctrl, skip_open, config.debug_start_at, &pools)?;
             if config.debug_timing {
                 let elapsed = t.elapsed();
                 let avg = if result.is_empty() { 0 } else { elapsed.as_millis() as usize / result.len() };
@@ -1025,17 +1068,20 @@ impl GoodScannerApplication {
         let ocr_backend = config.ocr_backend.clone().unwrap_or_else(|| "ppocrv5".to_string());
         let substat_ocr_backend = config.artifact_substat_ocr.clone();
         let scroll_delay = user_config.inv_scroll_delay;
+        let dump_images = config.dump_images;
 
         let init_executor = move || -> anyhow::Result<Box<dyn crate::server::ManageExecutor>> {
+    
+            let pool_config = OcrPoolConfig::detect();
+            let pools = Arc::new(SharedOcrPools::new(pool_config, &ocr_backend, &substat_ocr_backend)?);
             let game_info = Self::get_game_info()?;
             let ctrl = GenshinGameController::new(game_info)?;
             let manager = crate::manager::orchestrator::ArtifactManager::new(
                 mappings,
-                ocr_backend,
-                substat_ocr_backend,
+                pools,
                 scroll_delay,
                 false,
-                config.dump_images,
+                dump_images,
             );
             Ok(Box::new(crate::server::GameExecutor { ctrl, manager }))
         };
@@ -1265,13 +1311,20 @@ pub fn run_scan_core(
     let mut weapons = None;
     let mut artifacts = None;
 
+    // Create shared OCR pools for all scanners
+
+    let pool_config = OcrPoolConfig::detect();
+    let ocr_backend = config.ocr_backend.as_deref().unwrap_or("ppocrv5");
+    let substat_backend = config.artifact_substat_ocr.as_str();
+    let pools = SharedOcrPools::new(pool_config, ocr_backend, substat_backend)?;
+
     // Scan characters
     if config.scan_characters {
         report("扫描角色 / Scanning characters...");
         info!("=== 扫描角色 / Scanning characters ===");
         let char_config = GoodScannerApplication::make_char_config(&scanner_config, user_config);
         let scanner = GoodCharacterScanner::new(char_config, mappings.clone())?;
-        let result = scanner.scan(&mut ctrl, 0)?;
+        let result = scanner.scan(&mut ctrl, 0, &pools)?;
         info!("已扫描 / Scanned {} characters", result.len());
         characters = Some(result);
 
@@ -1286,7 +1339,7 @@ pub fn run_scan_core(
         info!("=== 扫描武器 / Scanning weapons ===");
         let weapon_config = GoodScannerApplication::make_weapon_config(&scanner_config, user_config);
         let scanner = GoodWeaponScanner::new(weapon_config, mappings.clone())?;
-        let result = scanner.scan(&mut ctrl, false, 0)?;
+        let result = scanner.scan(&mut ctrl, false, 0, &pools)?;
         info!("已扫描 / Scanned {} weapons", result.len());
         weapons = Some(result);
     }
@@ -1298,7 +1351,7 @@ pub fn run_scan_core(
         let artifact_config = GoodScannerApplication::make_artifact_config(&scanner_config, user_config);
         let skip_open = config.scan_weapons;
         let scanner = GoodArtifactScanner::new(artifact_config, mappings.clone())?;
-        let result = scanner.scan(&mut ctrl, skip_open, 0)?;
+        let result = scanner.scan(&mut ctrl, skip_open, 0, &pools)?;
         info!("已扫描 / Scanned {} artifacts", result.len());
         artifacts = Some(result);
     }
@@ -1369,13 +1422,15 @@ pub fn run_server_core(
     };
 
     let init_executor = move || -> anyhow::Result<Box<dyn crate::server::ManageExecutor>> {
+
         crate::manager::ui_actions::set_manager_delays(mgr_delays.clone());
+        let pool_config = OcrPoolConfig::detect();
+        let pools = Arc::new(SharedOcrPools::new(pool_config, &ocr_be, &substat_ocr)?);
         let game_info = GoodScannerApplication::get_game_info()?;
         let ctrl = GenshinGameController::new(game_info)?;
         let manager = crate::manager::orchestrator::ArtifactManager::new(
             mappings_clone,
-            ocr_be,
-            substat_ocr,
+            pools,
             scroll_delay,
             stop_on_all_matched,
             dump_images,
@@ -1426,11 +1481,13 @@ pub fn run_manage_json(
     let mut ctrl = GenshinGameController::new(game_info)?;
     let token = cancel_token.unwrap_or_else(yas::cancel::CancelToken::new);
 
-    let ocr_be = ocr_backend.unwrap_or("ppocrv5").to_string();
+
+    let ocr_be = ocr_backend.unwrap_or("ppocrv5");
+    let pool_config = OcrPoolConfig::detect();
+    let pools = Arc::new(SharedOcrPools::new(pool_config, ocr_be, artifact_substat_ocr)?);
     let manager = crate::manager::orchestrator::ArtifactManager::new(
         mappings,
-        ocr_be,
-        artifact_substat_ocr.to_string(),
+        pools,
         user_config.inv_scroll_delay,
         false,
         false, // dump_images: offline JSON mode doesn't support it

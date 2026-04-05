@@ -150,6 +150,19 @@ pub fn set_dpi_awareness() {
     }
 }
 
+/// Returns available physical memory in bytes, or None if detection fails.
+pub fn available_memory_bytes() -> Option<u64> {
+    use std::mem;
+    let mut status = unsafe { mem::zeroed::<windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX>() };
+    status.dwLength = mem::size_of::<windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX>() as u32;
+    let ret = unsafe { windows_sys::Win32::System::SystemInformation::GlobalMemoryStatusEx(&mut status) };
+    if ret != 0 {
+        Some(status.ullAvailPhys)
+    } else {
+        None
+    }
+}
+
 pub fn show_window_and_set_foreground(hwnd: HWND) {
     unsafe {
         ShowWindow(hwnd, SW_RESTORE);

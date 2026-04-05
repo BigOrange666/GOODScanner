@@ -43,6 +43,7 @@ features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_SystemServices",
     "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
 ]
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -1,15 +1,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use image::RgbImage;
 use log::{debug, info, warn};
 
+use yas::ocr::ImageToText;
 use crate::scanner::common::constants::*;
 use crate::scanner::common::coord_scaler::CoordScaler;
 use crate::scanner::common::debug_dump::DumpCtx;
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::GoodArtifact;
-use crate::scanner::common::ocr_factory;
+use crate::scanner::common::ocr_pool::SharedOcrPools;
 
 use super::models::*;
 use super::ui_actions;
@@ -25,20 +27,17 @@ pub struct EquipTarget {
 /// Executes equip/unequip operations by navigating character screens.
 pub struct EquipManager {
     mappings: Arc<MappingManager>,
-    ocr_backend: String,
-    #[allow(dead_code)]
-    substat_ocr_backend: String,
+    pools: Arc<SharedOcrPools>,
     dump_images: bool,
 }
 
 impl EquipManager {
     pub fn new(
         mappings: Arc<MappingManager>,
-        ocr_backend: String,
-        substat_ocr_backend: String,
+        pools: Arc<SharedOcrPools>,
         dump_images: bool,
     ) -> Self {
-        Self { mappings, ocr_backend, substat_ocr_backend, dump_images }
+        Self { mappings, pools, dump_images }
     }
 
     /// Execute a list of equip/unequip targets.
@@ -51,16 +50,7 @@ impl EquipManager {
         ctrl: &mut GenshinGameController,
         targets: &[EquipTarget],
     ) -> Vec<InstructionResult> {
-        let ocr = match ocr_factory::create_ocr_model(&self.ocr_backend) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("OCR模型创建失败 / OCR model creation failed: {}", e);
-                return targets.iter().map(|t| InstructionResult {
-                    id: t.result_id.clone(),
-                    status: InstructionStatus::OcrError,
-                }).collect();
-            }
-        };
+        let ocr = self.pools.v4().get();
 
         let scaler = ctrl.scaler.clone();
         let mut results: HashMap<String, InstructionResult> = HashMap::new();
@@ -91,14 +81,14 @@ impl EquipManager {
                 });
                 continue;
             }
-            let result = self.do_unequip(ctrl, target, &target.artifact.location);
+            let result = self.do_unequip(ctrl, target, &target.artifact.location, &ocr);
             results.insert(target.result_id.clone(), result);
         }
 
         // Process equip targets by scanning character roster in order
         if !char_groups.is_empty() {
             self.process_equip_by_roster_scan(
-                ctrl, &char_groups, ocr.as_ref(), &scaler, &mut results,
+                ctrl, &char_groups, &ocr, &scaler, &mut results,
             );
         }
 
@@ -418,8 +408,9 @@ impl EquipManager {
         ctrl: &mut GenshinGameController,
         target: &EquipTarget,
         current_owner: &str,
+        ocr: &dyn ImageToText<RgbImage>,
     ) -> InstructionResult {
-        if let Err(e) = ui_actions::open_character_screen(ctrl, current_owner, &self.mappings) {
+        if let Err(e) = ui_actions::open_character_screen(ctrl, current_owner, &self.mappings, ocr) {
             warn!("[equip_manager] 打开角色界面失败: {} / open character screen failed: {}", e, e);
             return InstructionResult {
                 id: target.result_id.clone(),

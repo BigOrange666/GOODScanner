@@ -19,7 +19,7 @@ use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::{DebugOcrField, DebugScanResult, GoodCharacter, GoodTalent};
 use crate::scanner::common::ocr_factory;
-use crate::scanner::common::ocr_pool::OcrPool;
+use crate::scanner::common::ocr_pool::{OcrPool, SharedOcrPools};
 use crate::scanner::common::stat_parser::level_to_ascension;
 
 /// Extra metadata from scanning a character, used for suspicious-result detection.
@@ -41,6 +41,10 @@ struct ScanMeta {
 ///
 /// The scanner holds only business logic (OCR model, mappings, config).
 /// The game controller is passed to `scan()` to share it across scanners.
+/// Tip logged after OCR failures that are likely caused by slow UI transitions.
+const DELAY_TIP: &str = "[tip] 如果扫描器切换过快，请在设置中增大「面板切换」或「切换角色」延迟 / \
+    [tip] If the scanner moves too fast, try increasing the \"Panel switch\" or \"Next character\" delay in settings";
+
 pub struct GoodCharacterScanner {
     config: GoodCharacterScannerConfig,
     mappings: Arc<MappingManager>,
@@ -309,6 +313,7 @@ impl GoodCharacterScanner {
         }
 
         warn!("[character] 等级OCR完全失败: {:?} / [character] level OCR completely failed: {:?}", text, text);
+        info!("{}", DELAY_TIP);
         // Save the level region for debugging
         if let Ok(im) = ctrl.capture_region(CHAR_LEVEL_RECT.0, CHAR_LEVEL_RECT.1, CHAR_LEVEL_RECT.2, CHAR_LEVEL_RECT.3) {
             let ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -374,7 +379,7 @@ impl GoodCharacterScanner {
         if Self::is_level_suspicious(level, ascended) {
             let max_level = Self::derive_max_level(level, ascended);
             info!(
-                "[character] 等级 {} (最大={}, 突破={}) 疑似异常，将在第二轮重新扫描 / [character] level {} (max={}, ascended={}) looks suspicious, will rescan in second pass",
+                "[character] 等级 {} (最大={}, 突破={}) 可能需要重新读取 / [character] level {} (max={}, ascended={}) may need re-reading",
                 level, max_level, ascended, level, max_level, ascended
             );
         }
@@ -635,6 +640,7 @@ impl GoodCharacterScanner {
             }
         }
         warn!("[talent] 点击回退失败 idx={}，默认为1 / [talent] click fallback failed for idx={}, defaulting to 1", talent_index, talent_index);
+        info!("{}", DELAY_TIP);
         Ok(1)
     }
 
@@ -756,9 +762,10 @@ impl GoodCharacterScanner {
             None => {
                 if self.config.continue_on_failure {
                     warn!("[character] 无法识别: \u{300C}{}\u{300D}，跳过 / [character] cannot identify: \u{300C}{}\u{300D}, skipping", raw_text, raw_text);
+                    info!("{}", DELAY_TIP);
                     return Ok((None, ScanMeta { talent_suspicious: false, raw_skill: 0, raw_burst: 0 }));
                 }
-                bail!("无法识别角色 / Cannot identify character: \u{300C}{}\u{300D}", raw_text);
+                bail!("无法识别角色 / Cannot identify character: \u{300C}{}\u{300D}\n{}", raw_text, DELAY_TIP);
             }
         };
 
@@ -886,20 +893,14 @@ impl GoodCharacterScanner {
     ///
     /// If `start_at_char > 0`, presses right arrow that many times to
     /// jump to a specific character index before scanning.
-    pub fn scan(&self, ctrl: &mut GenshinGameController, start_at_char: usize) -> Result<Vec<GoodCharacter>> {
+    pub fn scan(&self, ctrl: &mut GenshinGameController, start_at_char: usize, pools: &SharedOcrPools) -> Result<Vec<GoodCharacter>> {
         debug!("[character] 开始扫描... / [character] starting scan...");
         let now = SystemTime::now();
 
-        // Create OCR pool — 3 instances for parallel talent overview reads
-        let pool_size = 3;
-        let ocr_backend = self.config.ocr_backend.clone();
-        let ocr_pool = OcrPool::new(
-            move || ocr_factory::create_ocr_model(&ocr_backend),
-            pool_size,
-        )?;
-        // v5 fallback for character name — v4 dict lacks some chars (e.g. 魈/Xiao)
-        let name_fallback = ocr_factory::create_ocr_model("ppocrv5")?;
-        debug!("[character] OCR池: {} 个实例 + v5名字回退 / [character] OCR pool: {} instances + v5 name fallback", pool_size, pool_size);
+        // Use shared OCR pools (v4 for primary, v5 for name fallback).
+        let ocr_pool = pools.v4().clone();
+        // Hold a v5 instance for the entire scan (character scanner is sequential).
+        let name_fallback_guard = pools.v5().get();
 
         // Return to main world using BGI-style strategy:
         // press Escape one at a time, verify after each press.
@@ -931,6 +932,7 @@ impl GoodCharacterScanner {
         }
         if !screen_opened {
             error!("[character] 3次尝试后仍无法打开角色界面 / [character] failed to open character screen after 3 attempts");
+            info!("{}", DELAY_TIP);
         }
 
         // Jump to the specified character index
@@ -964,7 +966,7 @@ impl GoodCharacterScanner {
                 break;
             }
 
-            let result = self.scan_single_character(&ocr_pool, Some(name_fallback.as_ref()), ctrl, &first_name, reverse, viewed_count);
+            let result = self.scan_single_character(&ocr_pool, Some(&name_fallback_guard as &dyn ImageToText<RgbImage>), ctrl, &first_name, reverse, viewed_count);
 
             match result {
                 Ok((Some(character), meta)) => {
@@ -975,7 +977,7 @@ impl GoodCharacterScanner {
                         "{} Lv.{} C{} {}/{}/{}{}",
                         character.key, character.level, character.constellation,
                         character.talent.auto, character.talent.skill, character.talent.burst,
-                        if meta.talent_suspicious { " [talent suspicious]" } else { "" }
+                        if meta.talent_suspicious { " [will verify]" } else { "" }
                     );
                     if self.config.log_progress {
                         debug!("[character] {} / [character] {}", char_msg, char_msg);
@@ -1011,11 +1013,13 @@ impl GoodCharacterScanner {
             }
             if viewed_count > 3 && characters.is_empty() {
                 error!("[character] 已查看{}个但无结果，停止 / [character] viewed {} but no results, stopping", viewed_count, viewed_count);
+                info!("{}", DELAY_TIP);
                 break;
             }
             // Safety: break after too many consecutive failures (likely left character screen)
             if consecutive_failures >= 5 {
                 error!("[character] 连续{}次失败，停止扫描 / [character] {} consecutive failures, stopping scan", consecutive_failures, consecutive_failures);
+                info!("{}", DELAY_TIP);
                 break;
             }
 
@@ -1039,7 +1043,7 @@ impl GoodCharacterScanner {
             })
             .map(|(i, c)| {
                 info!(
-                    "[character] 索引{}处结果疑似异常: {} Lv.{} A{} C{} {}/{}/{} / [character] suspicious result at index {}: {} Lv.{} A{} C{} {}/{}/{}",
+                    "[character] 将重新读取索引{}: {} Lv.{} A{} C{} {}/{}/{} / [character] will re-read index {}: {} Lv.{} A{} C{} {}/{}/{}",
                     i, c.key, c.level, c.ascension, c.constellation,
                     c.talent.auto, c.talent.skill, c.talent.burst,
                     i, c.key, c.level, c.ascension, c.constellation,
@@ -1051,25 +1055,31 @@ impl GoodCharacterScanner {
 
         if !suspicious_indices.is_empty() && !ctrl.is_cancelled() {
             info!(
-                "[character] 第二轮: 重新扫描{}个疑似异常角色 / [character] second pass: rescanning {} suspicious characters",
+                "[character] 第二轮: 重新读取{}个角色以提高精度 / [character] second pass: re-reading {} characters for accuracy",
                 suspicious_indices.len(), suspicious_indices.len()
             );
-            self.rescan_suspicious(ctrl, &ocr_pool, Some(name_fallback.as_ref()), &mut characters, &suspicious_indices);
+            self.rescan_suspicious(ctrl, &ocr_pool, Some(&name_fallback_guard as &dyn ImageToText<RgbImage>), &mut characters, &suspicious_indices);
         }
 
         // Final sanitize: snap any remaining illegal levels to nearest valid value.
         // This runs after both passes — if OCR still produced an impossible level,
         // snap it rather than export garbage.
+        let mut had_impossible_level = false;
         for c in &mut characters {
             if (91..=94).contains(&c.level) {
                 warn!("[character] {} 最终修正: {} → 90 (不可能的等级) / [character] {} final snap: {} → 90 (impossible level)", c.key, c.level, c.key, c.level);
                 c.level = 90;
                 c.ascension = level_to_ascension(90, false);
+                had_impossible_level = true;
             } else if (96..=99).contains(&c.level) {
                 warn!("[character] {} 最终修正: {} → 95 (不可能的等级) / [character] {} final snap: {} → 95 (impossible level)", c.key, c.level, c.key, c.level);
                 c.level = 95;
                 c.ascension = level_to_ascension(95, false);
+                had_impossible_level = true;
             }
+        }
+        if had_impossible_level {
+            info!("{}", DELAY_TIP);
         }
 
         info!(
@@ -1216,8 +1226,8 @@ impl GoodCharacterScanner {
             let (name, _element, _raw) = self.read_name_and_element(&ocr, name_fallback_ocr, ctrl)
                 .unwrap_or((None, None, String::new()));
             if name.as_deref() != Some(&old.key) {
-                warn!(
-                    "[character] 重扫 #{}: 期望 {} 但得到 {:?}，跳过 / [character] rescan #{}: expected {} but got {:?}, skipping",
+                info!(
+                    "[character] 验证 #{}: 期望 {} 但读到 {:?}，跳过 / [character] verify #{}: expected {} but read {:?}, skipping",
                     target_idx, old.key, name, target_idx, old.key, name
                 );
                 continue;
@@ -1268,7 +1278,7 @@ impl GoodCharacterScanner {
                         new_auto, new_skill, new_burst));
                 }
                 info!(
-                    "[character] 重扫 #{} {}: {} / [character] rescan #{} {}: {}",
+                    "[character] 验证 #{} {}: {} / [character] verify #{} {}: {}",
                     target_idx, old.key, changes.join(", "),
                     target_idx, old.key, changes.join(", ")
                 );
@@ -1288,7 +1298,7 @@ impl GoodCharacterScanner {
                 }
             } else {
                 debug!(
-                    "[character] 重扫 #{} {}: 无变化 / [character] rescan #{} {}: no change",
+                    "[character] 验证 #{} {}: 无变化 / [character] verify #{} {}: no change",
                     target_idx, old.key, target_idx, old.key
                 );
             }

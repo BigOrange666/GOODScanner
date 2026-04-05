@@ -18,7 +18,6 @@ use crate::scanner::common::coord_scaler::CoordScaler;
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::fuzzy_match::fuzzy_match_map;
 use crate::scanner::common::mappings::MappingManager;
-use crate::scanner::common::ocr_factory;
 use crate::scanner::common::models::{GoodArtifact, GoodSubStat};
 use crate::scanner::common::roll_solver::{self, OcrCandidate, SolverInput};
 use crate::scanner::common::stat_parser;
@@ -323,6 +322,7 @@ pub fn open_character_screen(
     ctrl: &mut GenshinGameController,
     char_key: &str,
     mappings: &MappingManager,
+    ocr: &dyn ImageToText<RgbImage>,
 ) -> Result<()> {
     // Reverse-lookup: GOOD key -> Chinese name(s) for matching
     let cn_names: Vec<String> = mappings
@@ -332,12 +332,10 @@ pub fn open_character_screen(
         .map(|(k, _)| k.clone())
         .collect();
 
-    let ocr = ocr_factory::create_ocr_model("ppocrv4")?;
-
     // Ensure we're in main world first, then open character screen.
     ctrl.return_to_main_ui(8);
     yas::utils::sleep(d_action() * 5 / 8);
-    ensure_character_screen(ctrl, ocr.as_ref(), mappings)?;
+    ensure_character_screen(ctrl, ocr, mappings)?;
 
     let max_chars = 150; // safety limit (must exceed account roster size)
     let mut first_name: Option<String> = None;
@@ -348,7 +346,7 @@ pub fn open_character_screen(
         }
 
         // OCR character name
-        let name_text = ctrl.ocr_region(ocr.as_ref(), CHAR_NAME_RECT)?;
+        let name_text = ctrl.ocr_region(ocr, CHAR_NAME_RECT)?;
         let name_trimmed = name_text.trim().to_string();
         debug!("[open_character_screen] #{}: OCR识别名称='{}' / OCR name = '{}'", i, name_trimmed, name_trimmed);
 

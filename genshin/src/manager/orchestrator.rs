@@ -8,6 +8,7 @@ use yas::cancel::CancelToken;
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::GoodArtifact;
+use crate::scanner::common::ocr_pool::SharedOcrPools;
 
 use super::equip_manager::{EquipManager, EquipTarget};
 use super::lock_manager::LockManager;
@@ -27,8 +28,7 @@ pub struct LockTarget {
 
 pub struct ArtifactManager {
     mappings: Arc<MappingManager>,
-    ocr_backend: String,
-    substat_ocr_backend: String,
+    pools: Arc<SharedOcrPools>,
     delay_scroll: u64,
     stop_on_all_matched: bool,
     dump_images: bool,
@@ -37,13 +37,12 @@ pub struct ArtifactManager {
 impl ArtifactManager {
     pub fn new(
         mappings: Arc<MappingManager>,
-        ocr_backend: String,
-        substat_ocr_backend: String,
+        pools: Arc<SharedOcrPools>,
         delay_scroll: u64,
         stop_on_all_matched: bool,
         dump_images: bool,
     ) -> Self {
-        Self { mappings, ocr_backend, substat_ocr_backend, delay_scroll, stop_on_all_matched, dump_images }
+        Self { mappings, pools, delay_scroll, stop_on_all_matched, dump_images }
     }
 
     pub fn execute(
@@ -103,8 +102,8 @@ impl ArtifactManager {
 
         let lock_mgr = LockManager::new(
             self.mappings.clone(),
-            self.ocr_backend.clone(),
-            self.substat_ocr_backend.clone(),
+            self.pools.clone(),
+            self.dump_images,
         );
         let (lock_results, scanned_artifacts, matched_indices, scan_complete) = lock_mgr.execute(
             ctrl,
@@ -181,8 +180,7 @@ impl ArtifactManager {
 
         let equip_mgr = EquipManager::new(
             self.mappings.clone(),
-            self.ocr_backend.clone(),
-            self.substat_ocr_backend.clone(),
+            self.pools.clone(),
             self.dump_images,
         );
         let results = equip_mgr.execute(ctrl, &targets);

@@ -18,6 +18,11 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
+#[cfg(not(windows))]
+pub fn available_memory_bytes() -> Option<u64> {
+    None
+}
+
 mod misc;
 
 pub fn sleep(ms: u32) {
