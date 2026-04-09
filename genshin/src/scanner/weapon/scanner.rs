@@ -14,7 +14,8 @@ use crate::scanner::common::constants::*;
 use crate::scanner::common::coord_scaler::CoordScaler;
 use crate::scanner::common::equip_parser;
 use crate::scanner::common::fuzzy_match::fuzzy_match_map;
-use crate::scanner::common::grid_icon_detector::{GridIconResult, GridMode, GridPageDetection, ITEMS_PER_PAGE};
+use crate::scanner::common::grid_icon_detector::{GridIconResult, GridMode};
+use crate::scanner::common::grid_voter::{PagedGridVoter, ReadyItem};
 
 lazy_static::lazy_static! {
     static ref SLASH_RE: Regex = Regex::new(r"(\d+)\s*/\s*(\d+)").unwrap();
@@ -503,118 +504,54 @@ impl GoodWeaponScanner {
         let scan_config = BackpackScanConfig {
             delay_scroll: self.config.delay_scroll,
             delay_before_capture: self.config.capture_delay,
+            probe_last_cell_per_page: false,
         };
 
-        // Grid icon detection state (same 3-pass pattern as artifact scanner).
         let total = total_count as usize;
-        let items_per_page = ITEMS_PER_PAGE;
-        let mut grid_detection: Option<GridPageDetection> = None;
-        let mut grid_passes_done: u32 = 0;
-        let mut deferred_items: Vec<(usize, RgbImage)> = Vec::new();
+        let mut voter: PagedGridVoter<()> = PagedGridVoter::new(total, GridMode::Weapon);
 
-        bp.scan_grid(
-            total,
-            &scan_config,
-            start_at,
-            |event| {
-                match event {
-                    GridEvent::PageScrolled => {
-                        // New page — reset grid detection state
-                        grid_detection = None;
-                        grid_passes_done = 0;
-                        deferred_items.clear();
-                        ScanAction::Continue
-                    }
-                    GridEvent::Item(idx, image) => {
-                        if worker_handle.stop_requested() {
-                            return ScanAction::Stop;
-                        }
-
-                        // Quick rarity check on main thread
-                        if pixel_utils::weapon_below_min_rarity(&image, &scaler, self.config.min_rarity) {
-                            // Before stopping, flush deferred items with tie-breaking
-                            if grid_passes_done == 2 {
-                                if let Some(ref mut gd) = grid_detection {
-                                    gd.detect_pass(&image, &scaler, idx);
-                                }
-                            }
-                            for (def_idx, def_image) in deferred_items.drain(..) {
-                                let gi = grid_detection.as_ref().and_then(|gd| gd.get(def_idx));
-                                let worker_idx = def_idx - start_at;
-                                let _ = item_tx.send(WorkItem { index: worker_idx, image: def_image, metadata: gi });
-                            }
-                            return ScanAction::Stop;
-                        }
-
-                        // Grid icon detection
-                        let page_start = (idx / items_per_page) * items_per_page;
-                        let page_rel = idx - page_start;
-                        let page_items = (total - page_start).min(items_per_page);
-
-                        // Initialize grid detection for this page
-                        if grid_detection.is_none() {
-                            grid_detection = Some(GridPageDetection::with_mode(page_start, page_items, GridMode::Weapon));
-                            grid_passes_done = 0;
-                            deferred_items.clear();
-                        }
-
-                        // Run detection at scheduled page-relative indices
-                        if let Some(ref mut gd) = grid_detection {
-                            if page_rel == 0 && grid_passes_done == 0 {
-                                gd.detect_pass(&image, &scaler, idx);
-                                grid_passes_done = 1;
-                            } else if page_rel == 13 && grid_passes_done == 1 {
-                                gd.detect_pass(&image, &scaler, idx);
-                                grid_passes_done = 2;
-                            } else if page_rel == 26 && grid_passes_done == 2 {
-                                gd.detect_pass(&image, &scaler, idx);
-                                grid_passes_done = 3;
-                                // Flush deferred items now that we have 3 passes
-                                for (def_idx, def_image) in deferred_items.drain(..) {
-                                    let gi = gd.get(def_idx);
-                                    let worker_idx = def_idx - start_at;
-                                    if item_tx.send(WorkItem { index: worker_idx, image: def_image, metadata: gi }).is_err() {
-                                        error!("[weapon] 工作通道已关闭 / [weapon] worker channel closed");
-                                        return ScanAction::Stop;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Determine whether to send now or defer
-                        let grid_icons = grid_detection.as_ref().and_then(|gd| gd.get(idx));
-
-                        if grid_passes_done == 2 && page_rel >= 13 {
-                            // We have exactly 2 passes — defer until 3rd pass
-                            deferred_items.push((idx, image));
-                        } else {
-                            // Either 1 pass (items 0-12) or 3 passes (items 26+): send immediately
-                            let worker_idx = idx - start_at;
-                            if item_tx.send(WorkItem { index: worker_idx, image, metadata: grid_icons }).is_err() {
-                                error!("[weapon] 工作通道已关闭 / [weapon] worker channel closed");
-                                return ScanAction::Stop;
-                            }
-                        }
-
-                        ScanAction::Continue
-                    }
-                }
-            },
-        );
-
-        // Flush any remaining deferred items (scan stopped between pass 2 and 3)
-        if grid_passes_done == 2 && !deferred_items.is_empty() {
-            if let Some((last_idx, ref last_img)) = deferred_items.last().map(|(i, img)| (*i, img.clone())) {
-                if let Some(ref mut gd) = grid_detection {
-                    gd.detect_pass(&last_img, &scaler, last_idx);
+        let emit_ready = |ready: Vec<ReadyItem<()>>,
+                          item_tx: &crossbeam_channel::Sender<WorkItem<Option<GridIconResult>>>|
+         -> Result<(), ()> {
+            for item in ready {
+                let worker_idx = item.idx - start_at;
+                if item_tx
+                    .send(WorkItem { index: worker_idx, image: item.image, metadata: item.metadata })
+                    .is_err()
+                {
+                    error!("[weapon] 工作通道已关闭 / [weapon] worker channel closed");
+                    return Err(());
                 }
             }
-            for (def_idx, def_image) in deferred_items.drain(..) {
-                let gi = grid_detection.as_ref().and_then(|gd| gd.get(def_idx));
-                let worker_idx = def_idx - start_at;
-                let _ = item_tx.send(WorkItem { index: worker_idx, image: def_image, metadata: gi });
+            Ok(())
+        };
+
+        bp.scan_grid(total, &scan_config, start_at, |_ctrl, event| match event {
+            GridEvent::PageStarted { .. } => ScanAction::Continue,
+            GridEvent::PageCompleted { .. } => ScanAction::Continue,
+            GridEvent::PageScrolled => {
+                voter.reset_page();
+                ScanAction::Continue
             }
-        }
+            GridEvent::Item { idx, image, .. } => {
+                if worker_handle.stop_requested() {
+                    return ScanAction::Stop;
+                }
+                if pixel_utils::weapon_below_min_rarity(&image, &scaler, self.config.min_rarity) {
+                    let ready = voter.early_stop_flush(&image, idx, &scaler);
+                    let _ = emit_ready(ready, &item_tx);
+                    return ScanAction::Stop;
+                }
+                let ready = voter.record(idx, image, (), &scaler);
+                if emit_ready(ready, &item_tx).is_err() {
+                    return ScanAction::Stop;
+                }
+                ScanAction::Continue
+            }
+        });
+
+        let leftover = voter.final_flush(&scaler);
+        let _ = emit_ready(leftover, &item_tx);
 
         drop(item_tx);
         let weapons = worker_handle.join();

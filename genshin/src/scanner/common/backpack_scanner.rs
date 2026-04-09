@@ -111,18 +111,43 @@ pub fn open_backpack_to_tab(
     Ok((count, max))
 }
 
-/// What the scan callback should do after processing an item.
+/// What the scan callback should do after processing an event.
 pub enum ScanAction {
     /// Continue scanning.
     Continue,
     /// Stop scanning immediately.
     Stop,
+    /// Skip the rest of the current page. Only meaningful as a response to
+    /// `PageStarted` — ignored (treated as `Continue`) if returned from other
+    /// events.
+    SkipPage,
 }
 
 /// Events delivered to the scan callback.
 pub enum GridEvent {
-    /// An item was clicked and captured: (item_index, captured_image).
-    Item(usize, RgbImage),
+    /// Fired at the start of each page if `probe_last_cell_per_page` is set.
+    /// `scan_grid` has already clicked the bottom-right visible cell, waited
+    /// for the panel, and captured the image. The callback may return
+    /// `SkipPage` to skip the entire page without OCRing individual items.
+    PageStarted {
+        /// Cumulative item index at the top-left of the page.
+        page_start_idx: usize,
+        /// The captured image of the bottom-right visible cell.
+        last_cell_image: RgbImage,
+    },
+    /// An item was clicked and captured. `row` and `col` are screen-relative
+    /// grid positions (for re-clicking the same cell later).
+    Item {
+        idx: usize,
+        row: usize,
+        col: usize,
+        image: RgbImage,
+    },
+    /// Fired after all items on a page have been processed, before scrolling.
+    /// Only fires if at least one item was emitted on the page. Useful for
+    /// draining per-page OCR results / applying side effects while the page
+    /// is still in view.
+    PageCompleted { page_start_idx: usize },
     /// A page scroll just completed (useful for clearing per-page state).
     PageScrolled,
 }
@@ -133,6 +158,12 @@ pub struct BackpackScanConfig {
     /// Delay (ms) after panel load detection, before capture.
     /// Gives the panel extra time to finish rendering text.
     pub delay_before_capture: u64,
+    /// If true, `scan_grid` clicks the bottom-right visible cell at the start
+    /// of each page, captures its image, and emits `GridEvent::PageStarted`
+    /// so the caller can decide whether to skip the page. Scanners leave this
+    /// false; the lock manager enables it for its level-based page-skip
+    /// optimization.
+    pub probe_last_cell_per_page: bool,
 }
 
 /// Panel pool rect — region of the detail panel whose pixel sum changes
@@ -277,11 +308,11 @@ impl<'a> BackpackScanner<'a> {
     pub fn scan_grid<F>(
         &mut self,
         total: usize,
-        _config: &BackpackScanConfig,
+        config: &BackpackScanConfig,
         start_at: usize,
         mut callback: F,
     ) where
-        F: FnMut(GridEvent) -> ScanAction,
+        F: FnMut(&mut GenshinGameController, GridEvent) -> ScanAction,
     {
         let total_row = (total + GRID_COLS - 1) / GRID_COLS;
         let last_row_col = if total % GRID_COLS == 0 { GRID_COLS } else { total % GRID_COLS };
@@ -320,59 +351,167 @@ impl<'a> BackpackScanner<'a> {
         }
 
         'outer: while scanned_count < total {
-            for cur_row in start_row..row {
-                let row_item_count = if scanned_row == total_row - 1 {
-                    last_row_col
+            let page_start_idx = scanned_count;
+            let mut page_had_items = false;
+            let mut skip_page = false;
+
+            // --- Optional page probe: click bottom-right new cell, capture, ask callback. ---
+            if config.probe_last_cell_per_page {
+                // Screen row of the bottom-most new row is always `row - 1`
+                // (new rows occupy [start_row..row); bottom is row-1).
+                let probe_screen_row = row - 1;
+                let cum_row_at_probe = scanned_row + (probe_screen_row - start_row);
+                let probe_col = if cum_row_at_probe == total_row - 1 {
+                    last_row_col - 1
                 } else {
-                    GRID_COLS
+                    GRID_COLS - 1
                 };
-
-                for col in 0..row_item_count {
-                    if self.ctrl.check_rmb() || scanned_count >= total {
-                        break 'outer;
+                let x = GRID_FIRST_X + probe_col as f64 * GRID_OFFSET_X;
+                let y = GRID_FIRST_Y + probe_screen_row as f64 * GRID_OFFSET_Y;
+                self.ctrl.click_at(x, y);
+                let _ = self.ctrl.wait_until_panel_loaded(
+                    PANEL_POOL_RECT,
+                    PANEL_LOAD_TIMEOUT_MS,
+                );
+                if config.delay_before_capture > 0 {
+                    utils::sleep(config.delay_before_capture as u32);
+                }
+                match self.ctrl.capture_game() {
+                    Ok(image) => {
+                        let action = callback(
+                            &mut *self.ctrl,
+                            GridEvent::PageStarted {
+                                page_start_idx,
+                                last_cell_image: image,
+                            },
+                        );
+                        match action {
+                            ScanAction::Continue => {}
+                            ScanAction::SkipPage => skip_page = true,
+                            ScanAction::Stop => break 'outer,
+                        }
                     }
-
-                    // Skip items before start_at
-                    if scanned_count < start_at {
-                        scanned_count += 1;
-                        continue;
+                    Err(e) => {
+                        error!(
+                            "[backpack] 探测截图失败: {} / [backpack] probe capture failed: {}",
+                            e, e
+                        );
                     }
+                }
+            }
 
-                    // Click the grid item
-                    let x = GRID_FIRST_X + col as f64 * GRID_OFFSET_X;
-                    let y = GRID_FIRST_Y + cur_row as f64 * GRID_OFFSET_Y;
-                    self.ctrl.click_at(x, y);
-
-                    // Wait for panel to load
-                    let _ = self.ctrl.wait_until_panel_loaded(
-                        PANEL_POOL_RECT,
-                        PANEL_LOAD_TIMEOUT_MS,
-                    );
-
-                    // Pre-capture delay: let panel text finish rendering
-                    if _config.delay_before_capture > 0 {
-                        utils::sleep(_config.delay_before_capture as u32);
+            if skip_page {
+                // Advance counters past the skipped page without emitting items.
+                let new_rows = row - start_row;
+                let mut rows_added = 0usize;
+                while rows_added < new_rows {
+                    let cum_row = scanned_row + rows_added;
+                    let row_item_count = if cum_row == total_row - 1 {
+                        last_row_col
+                    } else {
+                        GRID_COLS
+                    };
+                    scanned_count += row_item_count;
+                    rows_added += 1;
+                    if scanned_count >= total {
+                        break;
                     }
+                }
+                scanned_row += rows_added;
+            } else {
+                let mut stopped = false;
+                'page: for cur_row in start_row..row {
+                    let row_item_count = if scanned_row == total_row - 1 {
+                        last_row_col
+                    } else {
+                        GRID_COLS
+                    };
 
-                    // Capture and process
-                    let image = match self.ctrl.capture_game() {
-                        Ok(img) => img,
-                        Err(e) => {
-                            error!("[backpack] 截图失败: {} / [backpack] capture failed: {}", e, e);
+                    for col in 0..row_item_count {
+                        if self.ctrl.check_rmb() || scanned_count >= total {
+                            stopped = true;
+                            break 'page;
+                        }
+
+                        // Skip items before start_at
+                        if scanned_count < start_at {
                             scanned_count += 1;
                             continue;
                         }
-                    };
 
-                    match callback(GridEvent::Item(scanned_count, image)) {
-                        ScanAction::Continue => {}
-                        ScanAction::Stop => break 'outer,
+                        // Click the grid item
+                        let x = GRID_FIRST_X + col as f64 * GRID_OFFSET_X;
+                        let y = GRID_FIRST_Y + cur_row as f64 * GRID_OFFSET_Y;
+                        self.ctrl.click_at(x, y);
+
+                        // Wait for panel to load
+                        let _ = self.ctrl.wait_until_panel_loaded(
+                            PANEL_POOL_RECT,
+                            PANEL_LOAD_TIMEOUT_MS,
+                        );
+
+                        // Pre-capture delay: let panel text finish rendering
+                        if config.delay_before_capture > 0 {
+                            utils::sleep(config.delay_before_capture as u32);
+                        }
+
+                        // Capture and process
+                        let image = match self.ctrl.capture_game() {
+                            Ok(img) => img,
+                            Err(e) => {
+                                error!("[backpack] 截图失败: {} / [backpack] capture failed: {}", e, e);
+                                scanned_count += 1;
+                                continue;
+                            }
+                        };
+
+                        page_had_items = true;
+                        let action = callback(
+                            &mut *self.ctrl,
+                            GridEvent::Item {
+                                idx: scanned_count,
+                                row: cur_row,
+                                col,
+                                image,
+                            },
+                        );
+                        match action {
+                            ScanAction::Continue => {}
+                            ScanAction::Stop => {
+                                scanned_count += 1;
+                                stopped = true;
+                                break 'page;
+                            }
+                            ScanAction::SkipPage => {
+                                // SkipPage is only valid from PageStarted.
+                                log::warn!(
+                                    "[backpack] SkipPage from Item handler is ignored; treating as Continue"
+                                );
+                            }
+                        }
+
+                        scanned_count += 1;
                     }
 
-                    scanned_count += 1;
+                    scanned_row += 1;
                 }
 
-                scanned_row += 1;
+                // Emit PageCompleted (if any items were processed) before scrolling
+                // or exiting. Gives the caller a chance to drain per-page work
+                // while the page is still in view.
+                if page_had_items {
+                    let action = callback(
+                        &mut *self.ctrl,
+                        GridEvent::PageCompleted { page_start_idx },
+                    );
+                    if matches!(action, ScanAction::Stop) {
+                        break 'outer;
+                    }
+                }
+
+                if stopped {
+                    break 'outer;
+                }
             }
 
             // Calculate how many rows remain and scroll
@@ -388,7 +527,10 @@ impl<'a> BackpackScanner<'a> {
                 break 'outer;
             }
 
-            callback(GridEvent::PageScrolled);
+            let action = callback(&mut *self.ctrl, GridEvent::PageScrolled);
+            if matches!(action, ScanAction::Stop) {
+                break 'outer;
+            }
         }
     }
 }

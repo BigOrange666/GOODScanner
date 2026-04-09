@@ -375,6 +375,47 @@ pub fn detect_artifact_lock(image: &RgbImage, scaler: &CoordScaler, y_shift: f64
     )
 }
 
+/// Verify that an artifact lock toggle succeeded, using asymmetric brightness
+/// thresholds that are permissive to mid-animation frames.
+///
+/// The lock icon has two end-states: dark (locked, brightness ~86) and bright
+/// (unlocked, brightness ~238). During the toggle animation the pixel passes
+/// through mid-brightness. A single threshold (<128) works for unlock→lock
+/// because the pixel darkens fast, but fails for lock→unlock because the
+/// brightening animation may not have crossed 128 by verify time.
+///
+/// Logic:
+/// - `desired_lock = true`  (just locked): accept if brightness is below
+///   `ICON_BRIGHT_ABSENT` (208). Any sign the pixel is darkening below the
+///   definitively-bright level means the lock animation started.
+/// - `desired_lock = false` (just unlocked): accept if brightness is above
+///   `ICON_BRIGHT_PRESENT` (116). Any sign the pixel is brightening above
+///   the definitively-dark level means the unlock animation started.
+///
+/// Checks both POS1 and POS2; either passing counts as verified.
+pub fn verify_artifact_lock_toggled(
+    image: &RgbImage,
+    scaler: &CoordScaler,
+    y_shift: f64,
+    desired_lock: bool,
+) -> bool {
+    use super::constants::{ARTIFACT_LOCK_POS1, ARTIFACT_LOCK_POS2};
+    let b1 = get_pixel_brightness(image, scaler, ARTIFACT_LOCK_POS1.0, ARTIFACT_LOCK_POS1.1 + y_shift);
+    let b2 = get_pixel_brightness(image, scaler, ARTIFACT_LOCK_POS2.0, ARTIFACT_LOCK_POS2.1 + y_shift);
+    let ok = if desired_lock {
+        // Expect darkening: below "definitely bright" threshold
+        b1 < ICON_BRIGHT_ABSENT || b2 < ICON_BRIGHT_ABSENT
+    } else {
+        // Expect brightening: above "definitely dark" threshold
+        b1 > ICON_BRIGHT_PRESENT || b2 > ICON_BRIGHT_PRESENT
+    };
+    log::debug!(
+        "[verify_lock] desired={} b1={} b2={} ok={} / [verify_lock] desired={} b1={} b2={} ok={}",
+        desired_lock, b1, b2, ok, desired_lock, b1, b2, ok
+    );
+    ok
+}
+
 /// Detect artifact astral mark via dual-pixel verification.
 /// Supports y_shift for elixir-crafted artifacts.
 ///

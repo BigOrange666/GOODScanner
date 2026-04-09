@@ -29,6 +29,7 @@ pub struct LockTarget {
 pub struct ArtifactManager {
     mappings: Arc<MappingManager>,
     pools: Arc<SharedOcrPools>,
+    capture_delay: u64,
     delay_scroll: u64,
     stop_on_all_matched: bool,
     dump_images: bool,
@@ -38,11 +39,12 @@ impl ArtifactManager {
     pub fn new(
         mappings: Arc<MappingManager>,
         pools: Arc<SharedOcrPools>,
+        capture_delay: u64,
         delay_scroll: u64,
         stop_on_all_matched: bool,
         dump_images: bool,
     ) -> Self {
-        Self { mappings, pools, delay_scroll, stop_on_all_matched, dump_images }
+        Self { mappings, pools, capture_delay, delay_scroll, stop_on_all_matched, dump_images }
     }
 
     pub fn execute(
@@ -108,6 +110,7 @@ impl ArtifactManager {
         let (lock_results, scanned_artifacts, matched_indices, scan_complete) = lock_mgr.execute(
             ctrl,
             &targets,
+            self.capture_delay,
             self.delay_scroll,
             self.stop_on_all_matched,
             max_target_level,

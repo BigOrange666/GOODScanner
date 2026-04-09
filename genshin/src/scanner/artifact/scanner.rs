@@ -15,7 +15,8 @@ use crate::scanner::common::coord_scaler::CoordScaler;
 use crate::scanner::common::equip_parser;
 use crate::scanner::common::fuzzy_match::fuzzy_match_map;
 use crate::scanner::common::game_controller::GenshinGameController;
-use crate::scanner::common::grid_icon_detector::{GridIconResult, GridPageDetection, ITEMS_PER_PAGE};
+use crate::scanner::common::grid_icon_detector::{GridIconResult, GridMode};
+use crate::scanner::common::grid_voter::{PagedGridVoter, ReadyItem};
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::{DebugOcrField, DebugScanResult, GoodArtifact, GoodSubStat};
 use crate::scanner::common::ocr_factory;
@@ -659,6 +660,21 @@ impl GoodArtifactScanner {
             );
             if stop { break; }
 
+            // If this line's OCR text matches a set name, we've run past the
+            // last real substat — the set name has moved up into this slot.
+            // This happens on 4-star lv0 artifacts that have only 2 initial
+            // substats (max_scan_lines assumes 3). Stop here; set detection
+            // downstream will pick up the set name from its computed Y.
+            if cands.is_empty()
+                && (Self::find_set_key_in_text(raw_texts[0].trim(), mappings).is_some()
+                    || Self::find_set_key_in_text(raw_texts[1].trim(), mappings).is_some())
+            {
+                if config.verbose {
+                    info!("[artifact] sub[{}] 识别为套装名行，停止扫描副词条 / [artifact] sub[{}] detected as set name row, stopping substat scan", i, i);
+                }
+                break;
+            }
+
             let (sub_x, sub_y, sub_w, sub_h) = sub_rect;
             let mut did_extend = false;
 
@@ -1065,6 +1081,24 @@ impl GoodArtifactScanner {
             }
         };
 
+        // Reject lower-rarity versions of higher-rarity sets, and all 3-star
+        // artifacts globally. In Genshin, 5-star sets have 4-star variants and
+        // 4-star sets have 3-star variants — the mappings file stores each
+        // set's canonical (max) rarity.
+        if rarity == 3 {
+            debug!("[artifact] 忽略3星圣遗物 / ignoring 3* artifact");
+            return Ok(ArtifactScanResult::Skip);
+        }
+        if let Some(&set_max_rarity) = mappings.artifact_set_max_rarity.get(&set_key) {
+            if rarity < set_max_rarity {
+                debug!(
+                    "[artifact] 忽略{}星 {} 变体（套装最高{}星） / ignoring {}* {} variant (set max {}*)",
+                    rarity, set_key, set_max_rarity, rarity, set_key, set_max_rarity
+                );
+                return Ok(ArtifactScanResult::Skip);
+            }
+        }
+
         // 8. Equipped character
         // Try v4 first, fall back to v5 if no match (v4 dict lacks some rare chars like 魈/Xiao)
         let equip_text = Self::ocr_image_region(substat_ocr, image, ocr_regions.equip, scaler)?;
@@ -1271,115 +1305,72 @@ impl GoodArtifactScanner {
         let scan_config = BackpackScanConfig {
             delay_scroll: self.config.delay_scroll,
             delay_before_capture: self.config.capture_delay,
+            probe_last_cell_per_page: false,
         };
 
-        // Grid icon detection state.
-        // Detection passes happen at page-relative item indices 0, 13, 26 (evenly spaced in 40).
-        //
-        // Tie-breaking: we want 1 or 3 passes per page, never 2 (ambiguous majority).
-        // - Items 0-12: sent with 1 pass (unambiguous)
-        // - Items 13+: we defer sending until we have 3 passes
-        // - If scanning stops before index 26, we run pass 3 on the last item's image
-        //   as a tie-breaker, then flush deferred items
-        let use_grid_detection = true;
+        // Per-page 3-pass voting state (shared across artifact / weapon / manager).
         let total = total_count as usize;
-        let items_per_page = ITEMS_PER_PAGE;
-        let mut grid_detection: Option<GridPageDetection> = None;
-        let mut grid_passes_done: u32 = 0;
-        // Buffer for items deferred until 3rd pass is done
-        let mut deferred_items: Vec<(usize, RgbImage)> = Vec::new();
+        let mut voter: PagedGridVoter<()> = PagedGridVoter::new(total, GridMode::Artifact);
+
+        // Helper to emit a batch of ready items to the worker channel.
+        // Returns Err(()) on channel close (caller should Stop).
+        let emit_ready = |ready: Vec<ReadyItem<()>>,
+                          item_tx: &crossbeam_channel::Sender<WorkItem<Option<GridIconResult>>>|
+         -> Result<(), ()> {
+            for item in ready {
+                let worker_idx = item.idx - start_at;
+                if item_tx
+                    .send(WorkItem {
+                        index: worker_idx,
+                        image: item.image,
+                        metadata: item.metadata,
+                    })
+                    .is_err()
+                {
+                    error!("[artifact] 工作通道已关闭 / [artifact] worker channel closed");
+                    return Err(());
+                }
+            }
+            Ok(())
+        };
 
         bp.scan_grid(
             total,
             &scan_config,
             start_at,
-            |event| {
+            |_ctrl, event| {
                 match event {
+                    GridEvent::PageStarted { .. } => ScanAction::Continue,
+                    GridEvent::PageCompleted { .. } => ScanAction::Continue,
                     GridEvent::PageScrolled => {
-                        // New page — reset grid detection state
-                        grid_detection = None;
-                        grid_passes_done = 0;
-                        deferred_items.clear();
+                        voter.reset_page();
                         ScanAction::Continue
                     }
-                    GridEvent::Item(idx, image) => {
+                    GridEvent::Item { idx, image, .. } => {
                         // Check if worker has signaled stop (e.g., too many errors)
                         if worker_handle.stop_requested() {
                             return ScanAction::Stop;
                         }
 
-                        // Quick rarity check on main thread to stop early
-                        if pixel_utils::artifact_below_min_rarity(&image, &scaler, self.config.min_rarity) {
-                            // Before stopping, flush deferred items with available grid results
-                            if use_grid_detection && grid_passes_done == 2 {
-                                // Tie-breaker: run 3rd pass on current image
-                                if let Some(ref mut gd) = grid_detection {
-                                    gd.detect_pass(&image, &scaler, idx);
-                                    grid_passes_done = 3;
-                                }
-                            }
-                            for (def_idx, def_image) in deferred_items.drain(..) {
-                                let gi = grid_detection.as_ref().and_then(|gd| gd.get(def_idx));
-                                let worker_idx = def_idx - start_at;
-                                let _ = item_tx.send(WorkItem { index: worker_idx, image: def_image, metadata: gi });
-                            }
+                        // Quick rarity check on main thread to stop early.
+                        // Before stopping, tie-break + flush deferred items
+                        // using this image; the trigger item itself is dropped.
+                        if pixel_utils::artifact_below_min_rarity(
+                            &image,
+                            &scaler,
+                            self.config.min_rarity,
+                        ) {
+                            let ready = voter.early_stop_flush(&image, idx, &scaler);
+                            let _ = emit_ready(ready, &item_tx);
                             return ScanAction::Stop;
                         }
 
-                        // Grid icon detection
-                        let page_start = (idx / items_per_page) * items_per_page;
-                        let page_rel = idx - page_start;
-                        let page_items = (total - page_start).min(items_per_page);
-
-                        if use_grid_detection {
-                            // Initialize grid detection for this page
-                            if grid_detection.is_none() {
-                                grid_detection = Some(GridPageDetection::new(page_start, page_items));
-                                grid_passes_done = 0;
-                                deferred_items.clear();
-                            }
-
-                            // Run detection at scheduled page-relative indices
-                            if let Some(ref mut gd) = grid_detection {
-                                if page_rel == 0 && grid_passes_done == 0 {
-                                    gd.detect_pass(&image, &scaler, idx);
-                                    grid_passes_done = 1;
-                                } else if page_rel == 13 && grid_passes_done == 1 {
-                                    gd.detect_pass(&image, &scaler, idx);
-                                    grid_passes_done = 2;
-                                } else if page_rel == 26 && grid_passes_done == 2 {
-                                    gd.detect_pass(&image, &scaler, idx);
-                                    grid_passes_done = 3;
-                                    // Flush deferred items now that we have 3 passes
-                                    for (def_idx, def_image) in deferred_items.drain(..) {
-                                        let gi = gd.get(def_idx);
-                                        let worker_idx = def_idx - start_at;
-                                        if item_tx.send(WorkItem { index: worker_idx, image: def_image, metadata: gi }).is_err() {
-                                            error!("[artifact] 工作通道已关闭 / [artifact] worker channel closed");
-                                            return ScanAction::Stop;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Determine whether to send now or defer
-                        let grid_icons = if use_grid_detection {
-                            grid_detection.as_ref().and_then(|gd| gd.get(idx))
-                        } else {
-                            None
-                        };
-
-                        if use_grid_detection && grid_passes_done == 2 && page_rel >= 13 {
-                            // We have exactly 2 passes — defer until 3rd pass
-                            deferred_items.push((idx, image));
-                        } else {
-                            // Either 1 pass (items 0-12) or 3 passes (items 26+): send immediately
-                            let worker_idx = idx - start_at;
-                            if item_tx.send(WorkItem { index: worker_idx, image, metadata: grid_icons }).is_err() {
-                                error!("[artifact] 工作通道已关闭 / [artifact] worker channel closed");
-                                return ScanAction::Stop;
-                            }
+                        // Record the item with the voter; emit any items
+                        // that are now ready (the current item itself and/or
+                        // previously-deferred items flushed at pass 3).
+                        let ready = voter.record(idx, image, (), &scaler);
+                        if emit_ready(ready, &item_tx).is_err() {
+                            return ScanAction::Stop;
                         }
 
                         ScanAction::Continue
@@ -1390,19 +1381,8 @@ impl GoodArtifactScanner {
 
         // After scan_grid returns, flush any remaining deferred items.
         // This handles the case where scanning stopped between pass 2 and pass 3.
-        if use_grid_detection && grid_passes_done == 2 && !deferred_items.is_empty() {
-            // Use the last deferred item's image for tie-breaking 3rd pass
-            if let Some((last_idx, ref last_img)) = deferred_items.last().map(|(i, img)| (*i, img.clone())) {
-                if let Some(ref mut gd) = grid_detection {
-                    gd.detect_pass(&last_img, &scaler, last_idx);
-                }
-            }
-            for (def_idx, def_image) in deferred_items.drain(..) {
-                let gi = grid_detection.as_ref().and_then(|gd| gd.get(def_idx));
-                let worker_idx = def_idx - start_at;
-                let _ = item_tx.send(WorkItem { index: worker_idx, image: def_image, metadata: gi });
-            }
-        }
+        let leftover = voter.final_flush(&scaler);
+        let _ = emit_ready(leftover, &item_tx);
 
         // Drop sender to signal worker that no more items are coming
         drop(item_tx);

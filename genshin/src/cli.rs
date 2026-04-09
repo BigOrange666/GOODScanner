@@ -1068,10 +1068,11 @@ impl GoodScannerApplication {
         let ocr_backend = config.ocr_backend.clone().unwrap_or_else(|| "ppocrv5".to_string());
         let substat_ocr_backend = config.artifact_substat_ocr.clone();
         let scroll_delay = user_config.inv_scroll_delay;
+        let capture_delay = user_config.capture_delay;
         let dump_images = config.dump_images;
 
         let init_executor = move || -> anyhow::Result<Box<dyn crate::server::ManageExecutor>> {
-    
+
             let pool_config = OcrPoolConfig::detect();
             let pools = Arc::new(SharedOcrPools::new(pool_config, &ocr_backend, &substat_ocr_backend)?);
             let game_info = Self::get_game_info()?;
@@ -1079,6 +1080,7 @@ impl GoodScannerApplication {
             let manager = crate::manager::orchestrator::ArtifactManager::new(
                 mappings,
                 pools,
+                capture_delay,
                 scroll_delay,
                 false,
                 dump_images,
@@ -1412,6 +1414,7 @@ pub fn run_server_core(
     let ocr_be = ocr_backend.unwrap_or("ppocrv5").to_string();
     let substat_ocr = artifact_substat_ocr.to_string();
     let scroll_delay = user_config.inv_scroll_delay;
+    let capture_delay = user_config.capture_delay;
     let mappings_clone = mappings.clone();
 
     let mgr_delays = crate::manager::ui_actions::ManagerDelays {
@@ -1431,6 +1434,7 @@ pub fn run_server_core(
         let manager = crate::manager::orchestrator::ArtifactManager::new(
             mappings_clone,
             pools,
+            capture_delay,
             scroll_delay,
             stop_on_all_matched,
             dump_images,
@@ -1488,6 +1492,7 @@ pub fn run_manage_json(
     let manager = crate::manager::orchestrator::ArtifactManager::new(
         mappings,
         pools,
+        user_config.capture_delay,
         user_config.inv_scroll_delay,
         false,
         false, // dump_images: offline JSON mode doesn't support it
