@@ -132,6 +132,7 @@ const ALLOWED_ORIGINS: &[&str] = &[
 /// - `http://localhost[:port]` (development)
 /// - `http://127.0.0.1[:port]` (development)
 fn is_origin_allowed(origin: &str) -> bool {
+    let origin = origin.trim_end_matches('/');
     if ALLOWED_ORIGINS.contains(&origin) {
         return true;
     }
@@ -297,7 +298,9 @@ where
             // If absent, allow (CORS is a browser-enforced mechanism).
             let origin = get_origin(&request);
             let cors_origin: Option<String> = match &origin {
-                Some(o) if is_origin_allowed(o) => Some(o.clone()),
+                Some(o) if is_origin_allowed(o) => {
+                    Some(o.trim_end_matches('/').to_string())
+                }
                 Some(o) => {
                     warn!("拒绝非法来源 / Rejected disallowed origin: {}", o);
                     respond_json(request, 403,
