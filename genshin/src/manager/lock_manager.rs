@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crossbeam_channel;
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use crate::scanner::artifact::GoodArtifactScanner;
 use crate::scanner::common::backpack_scanner::{
@@ -117,7 +117,7 @@ impl LockManager {
             ctrl, "artifact", 1200, 400, &count_ocr_guard,
         ) {
             Ok((count, _max)) => {
-                info!("[lock_manager] 共 {} 个圣遗物 / {} artifacts total", count, count);
+                debug!("[lock_manager] 共 {} 个圣遗物 / {} artifacts total", count, count);
                 count as usize
             }
             Err(e) => {
@@ -132,7 +132,7 @@ impl LockManager {
         };
 
         if total == 0 {
-            info!("[lock_manager] 背包中没有圣遗物 / No artifacts in backpack");
+            info!("[lock_manager] 背包中没有圣遗物，无法执行锁定操作 / No artifacts in backpack, cannot perform lock operations");
             return (
                 targets.iter().map(|t| InstructionResult {
                     id: t.result_id.clone(),
@@ -201,8 +201,8 @@ impl LockManager {
                         &scaler_cb,
                     );
                     if level > max_target_level {
-                        info!(
-                            "[lock_manager] 页面跳过：末尾等级={} > 最高目标等级={} (page_start={}) / Page skip: last level={} > max target={} (page_start={})",
+                        debug!(
+                            "[lock_manager] 页面跳过：末尾等级={} > 最高目���等级={} (page_start={}) / Page skip: last level={} > max target={} (page_start={})",
                             level, max_target_level, page_start_idx,
                             level, max_target_level, page_start_idx
                         );
@@ -258,7 +258,7 @@ impl LockManager {
                             GoodArtifactScanner::scan_level_only(&guard, &image, &scaler_cb) <= 0
                         }
                     {
-                        info!(
+                        debug!(
                             "[lock_manager] 检测到低稀有度lv0圣遗物，当前页后停止 / Low rarity lv0 artifact detected, stopping after current page"
                         );
                         rarity_stopped = true;
@@ -415,7 +415,7 @@ impl LockManager {
                             } else {
                                 ("解锁成功", "Unlock success")
                             };
-                            info!(
+                            debug!(
                                 "[lock_manager] {} ({},{}) / {}",
                                 cn, toggle.row, toggle.col, en
                             );
@@ -425,7 +425,8 @@ impl LockManager {
                             });
                         } else {
                             warn!(
-                                "[lock_manager] 锁定验证失败 ({},{}): 期望={} 实际={} / Lock verify failed",
+                                "[lock_manager] 锁定验证失败 ({},{}): 期望={} 实际={} / Lock verify failed ({},{}): expected={} actual={}",
+                                toggle.row, toggle.col, toggle.desired_lock, new_lock,
                                 toggle.row, toggle.col, toggle.desired_lock, new_lock
                             );
                             results.insert(toggle.result_id.clone(), InstructionResult {
@@ -457,10 +458,13 @@ impl LockManager {
         });
 
         // Compute scan completeness. Rarity early-stop counts as a complete
-        // scan (we've visited every ≥4★ artifact). Matches previous semantics.
+        // scan (we've visited every ≥4★ artifact). When stop_on_all_matched is
+        // enabled, pages may be skipped (level-based page-skip) and the scan
+        // stops early — the scanned data is always partial, so never produce
+        // a snapshot.
         let scanned_all = scanned_artifacts.last().map(|(idx, _)| *idx + 1 >= total).unwrap_or(false);
-        let all_matched_stop = stop_on_all_matched && matched.len() == targets.len();
-        let scan_complete = (scanned_all || rarity_stopped || all_matched_stop)
+        let scan_complete = !stop_on_all_matched
+            && (scanned_all || rarity_stopped)
             && !ctrl.is_cancelled();
 
         // Mark unmatched targets.

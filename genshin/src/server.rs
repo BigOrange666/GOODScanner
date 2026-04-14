@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use anyhow::{anyhow, Result};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use tiny_http::{Header, Method, Response, Server};
 
 use crate::manager::models::*;
@@ -319,7 +319,9 @@ where
                         resp.add_header(header);
                     }
                 }
-                let _ = request.respond(resp);
+                if let Err(e) = request.respond(resp) {
+                    debug!("CORS preflight 响应失败 / CORS preflight response failed: {}", e);
+                }
                 continue;
             }
 
@@ -452,7 +454,7 @@ where
     // This thread owns ctrl (which is !Send) so it must be the original thread.
     // Game controller + manager are created lazily on first job to avoid
     // focusing the game window at server startup.
-    info!("执行线程就绪 / Execution thread ready");
+    debug!("执行线程就绪 / Execution thread ready");
     let mut executor: Option<Box<dyn ManageExecutor>> = None;
     let mut init_executor = Some(init_executor);
 
@@ -478,7 +480,10 @@ where
                         executor = Some(e);
                     }
                     Err(e) => {
-                        error!("游戏初始化失败 / Game init failed: {}", e);
+                        error!(
+                            "[job {}] 游戏初始化失败 / Game init failed:\n{:#}",
+                            job_id, e
+                        );
                         let mut state = job_state.lock().unwrap();
                         let total_count = match &request {
                             JobRequest::Manage(r) => r.lock.len() + r.unlock.len(),
@@ -496,7 +501,6 @@ where
                             summary,
                         };
                         *state = JobState::completed(job_id.clone(), result);
-                        info!("[job {}] 执行失败（游戏初始化）/ Failed (game init)", job_id);
                         continue;
                     }
                 }
@@ -504,6 +508,23 @@ where
         }
 
         let exec = executor.as_mut().unwrap();
+
+        // Immediately invalidate any cached artifact snapshot before execution
+        // starts. Lock/unlock changes and equip changes will modify in-game
+        // state, so clients must not read stale data during the scan.
+        {
+            let invalidate_now = match &request {
+                JobRequest::Manage(r) => !r.lock.is_empty() || !r.unlock.is_empty(),
+                JobRequest::Equip(_) => true,
+            };
+            if invalidate_now {
+                let mut cache = artifact_cache.lock().unwrap();
+                if matches!(*cache, ArtifactCache::Complete(_)) {
+                    *cache = ArtifactCache::Incomplete;
+                    debug!("[job {}] 执行前清除快照缓存 / Pre-execution: artifact cache invalidated", job_id);
+                }
+            }
+        }
 
         let progress_state = job_state.clone();
         let progress_fn = move |completed: usize, total: usize, current_id: &str, phase: &str| {
@@ -581,7 +602,7 @@ where
     }
 
     // Channel disconnected — HTTP thread exited
-    info!("HTTP 线程已断开 / HTTP thread disconnected, shutting down");
+    debug!("HTTP 线程已断开 / HTTP thread disconnected, shutting down");
     Ok(())
 }
 
@@ -1634,6 +1655,114 @@ mod tests {
         let resp = client.get(format!("{}/artifacts", base)).send().unwrap();
         assert_eq!(resp.status().as_u16(), 503);
 
+        stop_server(&shutdown, handle);
+    }
+
+    #[test]
+    fn test_artifacts_cleared_when_update_inventory_off_after_on() {
+        // When update_inventory is ON, a full scan produces a snapshot (200).
+        // When update_inventory is OFF in the same session, the snapshot must
+        // be cleared — partial/skipped scans should never serve stale data.
+        let mut responses = VecDeque::new();
+        // Job 1: update_inventory ON → full scan with snapshot
+        let artifacts = vec![
+            make_artifact("GladiatorsFinale", "flower", 20, true),
+            make_artifact("WanderersTroupe", "plume", 16, false),
+        ];
+        responses.push_back((
+            make_result(&[("a", InstructionStatus::Success)]),
+            Some(artifacts),
+        ));
+        // Job 2: update_inventory OFF → no snapshot (partial scan, pages skipped)
+        responses.push_back((
+            make_result(&[("b", InstructionStatus::Success)]),
+            None,
+        ));
+        let (port, shutdown, handle) = start_test_server(responses, 0);
+        let client = reqwest::blocking::Client::new();
+        let base = format!("http://127.0.0.1:{}", port);
+
+        // Job 1 — update_inventory ON: full scan populates cache
+        client
+            .post(format!("{}/manage", base))
+            .header("Content-Type", "application/json")
+            .body(make_manage_body(&["a"]))
+            .send()
+            .unwrap();
+        poll_until_completed(port);
+
+        let resp = client.get(format!("{}/artifacts", base)).send().unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().unwrap();
+        assert_eq!(body.as_array().unwrap().len(), 2);
+
+        // Job 2 — update_inventory OFF: lock changes applied, no snapshot
+        client
+            .post(format!("{}/manage", base))
+            .header("Content-Type", "application/json")
+            .body(make_manage_body(&["b"]))
+            .send()
+            .unwrap();
+        poll_until_completed(port);
+
+        // Must NOT return the stale snapshot from job 1
+        let resp = client.get(format!("{}/artifacts", base)).send().unwrap();
+        assert_ne!(resp.status().as_u16(), 200,
+            "/artifacts must not serve stale data after a scan with update_inventory OFF");
+
+        stop_server(&shutdown, handle);
+    }
+
+    #[test]
+    fn test_artifacts_cleared_immediately_when_job_starts() {
+        // Even during execution, /artifacts must not return stale data from a
+        // previous scan. The cache should be invalidated as soon as the job
+        // starts, not only after it finishes.
+        let mut responses = VecDeque::new();
+        // Job 1: full scan with snapshot
+        let artifacts = vec![make_artifact("GladiatorsFinale", "flower", 20, true)];
+        responses.push_back((
+            make_result(&[("a", InstructionStatus::Success)]),
+            Some(artifacts),
+        ));
+        // Job 2: slow job (3s) with no snapshot
+        responses.push_back((
+            make_result(&[("b", InstructionStatus::Success)]),
+            None,
+        ));
+        let (port, shutdown, handle) = start_test_server(responses, 3000);
+        let client = reqwest::blocking::Client::new();
+        let base = format!("http://127.0.0.1:{}", port);
+
+        // Job 1 — populates cache
+        client
+            .post(format!("{}/manage", base))
+            .header("Content-Type", "application/json")
+            .body(make_manage_body(&["a"]))
+            .send()
+            .unwrap();
+        poll_until_completed(port);
+
+        let resp = client.get(format!("{}/artifacts", base)).send().unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        // Job 2 — submit and check /artifacts while still running
+        client
+            .post(format!("{}/manage", base))
+            .header("Content-Type", "application/json")
+            .body(make_manage_body(&["b"]))
+            .send()
+            .unwrap();
+
+        // Wait for the job to start executing (past the 1s pre-delay)
+        std::thread::sleep(Duration::from_millis(1500));
+
+        // Cache must already be invalidated mid-execution
+        let resp = client.get(format!("{}/artifacts", base)).send().unwrap();
+        assert_ne!(resp.status().as_u16(), 200,
+            "/artifacts must be cleared as soon as a lock job starts, not after it finishes");
+
+        poll_until_completed(port);
         stop_server(&shutdown, handle);
     }
 
