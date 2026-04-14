@@ -7,6 +7,7 @@ extern crate log;
 extern crate lazy_static;
 
 pub mod cancel;
+#[macro_use]
 pub mod lang;
 pub mod common;
 pub mod export;
