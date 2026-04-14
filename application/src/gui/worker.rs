@@ -1,8 +1,211 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 
 use super::log_bridge;
 use super::state::{AppState, Lang, LogSource, TaskStatus};
+
+// ── Windows SEH guard ────────────────────────────────────────────
+//
+// `catch_unwind` only catches Rust panics.  On Windows, hard crashes
+// (access violations, stack overflows, etc.) raise SEH exceptions that
+// bypass `catch_unwind` and silently terminate the entire process.
+//
+// We install a *vectored exception handler* (first-chance, process-wide,
+// installed once) that checks a thread-local flag.  If the faulting thread
+// is a worker spawned by `spawn_with_safety_net`:
+//   1. Write a human-readable error into the shared `TaskStatus`.
+//   2. Redirect the instruction pointer to `ExitThread(1)` so only the
+//      worker thread terminates — the GUI keeps running.
+
+#[cfg(target_os = "windows")]
+mod seh_guard {
+    use std::sync::{Arc, Mutex, Once};
+
+    use super::TaskStatus;
+
+    // ── thread-local context set by spawn_with_safety_net ──────────
+    thread_local! {
+        static SEH_STATUS: std::cell::RefCell<Option<Arc<Mutex<TaskStatus>>>> =
+            std::cell::RefCell::new(None);
+        static SEH_TASK_NAME: std::cell::RefCell<String> =
+            std::cell::RefCell::new(String::new());
+    }
+
+    /// Mark the current thread as a guarded worker.
+    pub fn set_context(name: &str, status: Arc<Mutex<TaskStatus>>) {
+        SEH_STATUS.with(|s| *s.borrow_mut() = Some(status));
+        SEH_TASK_NAME.with(|n| *n.borrow_mut() = name.to_string());
+    }
+
+    /// Remove the guard (normal exit path).
+    pub fn clear_context() {
+        SEH_STATUS.with(|s| *s.borrow_mut() = None);
+    }
+
+    // ── one-time global handler installation ───────────────────────
+    static INSTALLED: Once = Once::new();
+
+    pub fn install_global_handler() {
+        INSTALLED.call_once(|| unsafe {
+            windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler(
+                1, // first-chance (before any frame-based handlers)
+                Some(vectored_handler),
+            );
+        });
+    }
+
+    /// Fatal exception codes we intercept.
+    fn is_fatal(code: i32) -> bool {
+        const ACCESS_VIOLATION: i32 = 0xC0000005_u32 as i32;
+        const STACK_OVERFLOW: i32 = 0xC00000FD_u32 as i32;
+        const INT_DIVIDE_BY_ZERO: i32 = 0xC0000094_u32 as i32;
+        const ILLEGAL_INSTRUCTION: i32 = 0xC000001D_u32 as i32;
+        const PRIVILEGED_INSTRUCTION: i32 = 0xC0000096_u32 as i32;
+        const HEAP_CORRUPTION: i32 = 0xC0000374_u32 as i32;
+
+        matches!(
+            code,
+            ACCESS_VIOLATION
+                | STACK_OVERFLOW
+                | INT_DIVIDE_BY_ZERO
+                | ILLEGAL_INSTRUCTION
+                | PRIVILEGED_INSTRUCTION
+                | HEAP_CORRUPTION
+        )
+    }
+
+    fn exception_name(code: i32) -> &'static str {
+        let u = code as u32;
+        match u {
+            0xC0000005 => "Access Violation / 访问违规",
+            0xC00000FD => "Stack Overflow / 栈溢出",
+            0xC0000094 => "Integer Divide by Zero / 整数除零",
+            0xC000001D => "Illegal Instruction / 非法指令",
+            0xC0000096 => "Privileged Instruction / 特权指令",
+            0xC0000374 => "Heap Corruption / 堆损坏",
+            _ => "Unknown Exception / 未知异常",
+        }
+    }
+
+    /// Vectored exception handler callback (called by Windows).
+    ///
+    /// # Safety
+    /// Called by the OS exception dispatcher.  We only touch our own
+    /// thread-locals and the provided CONTEXT — both are safe here.
+    unsafe extern "system" fn vectored_handler(
+        info: *mut windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS,
+    ) -> i32 {
+        const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+        const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
+
+        if info.is_null() {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        let record = (*info).ExceptionRecord;
+        if record.is_null() {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        let code = (*record).ExceptionCode;
+
+        if !is_fatal(code) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // Check if this thread is a guarded worker
+        let handled = SEH_STATUS.with(|s| {
+            let guard = s.borrow();
+            if let Some(ref status) = *guard {
+                let name = SEH_TASK_NAME.with(|n| n.borrow().clone());
+                let desc = exception_name(code);
+                let hex = code as u32;
+                let msg = format!(
+                    "{} 崩溃 (0x{:08X}: {}) / {} crashed (0x{:08X}: {})",
+                    name, hex, desc, name, hex, desc,
+                );
+
+                // Best-effort status update (mutex might be poisoned)
+                if let Ok(mut st) = status.lock() {
+                    if matches!(*st, TaskStatus::Running(_)) {
+                        *st = TaskStatus::Failed(
+                            yas::lang::localize(&msg),
+                        );
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        });
+
+        if !handled {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // Redirect execution to ExitThread(1) — kills only this thread.
+        let ctx = (*info).ContextRecord;
+        if !ctx.is_null() {
+            // ExitThread expects one argument (exit code) in RCX on x64.
+            (*ctx).Rcx = 1;
+            // Align RSP to 16 bytes (Windows x64 ABI requirement).
+            (*ctx).Rsp = (*ctx).Rsp & !0xF;
+            // Jump to ExitThread.
+            (*ctx).Rip = windows_sys::Win32::System::Threading::ExitThread as u64;
+        }
+
+        EXCEPTION_CONTINUE_EXECUTION
+    }
+}
+
+/// Run a closure on a background thread with comprehensive error handling:
+/// - Catches Rust panics via `catch_unwind`
+/// - On Windows, installs a vectored exception handler to catch SEH crashes
+///   (access violations, etc.) and convert them to a Failed status.
+///
+/// The closure should set `status` to Completed/Failed on success/error.
+/// This wrapper only intervenes for unexpected crashes.
+fn spawn_with_safety_net(
+    name: &str,
+    log_source: LogSource,
+    status: Arc<Mutex<TaskStatus>>,
+    f: impl FnOnce(Arc<Mutex<TaskStatus>>) + Send + 'static,
+) -> JoinHandle<()> {
+    // Ensure the global SEH handler is registered (idempotent).
+    #[cfg(target_os = "windows")]
+    seh_guard::install_global_handler();
+
+    let task_name = name.to_string();
+    thread::spawn(move || {
+        log_bridge::set_thread_log_source(log_source);
+
+        // Register this thread for SEH protection.
+        #[cfg(target_os = "windows")]
+        seh_guard::set_context(&task_name, status.clone());
+
+        let status_for_crash = status.clone();
+        let task_name_for_crash = task_name.clone();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            f(status);
+        }));
+
+        // Normal exit — remove SEH guard.
+        #[cfg(target_os = "windows")]
+        seh_guard::clear_context();
+
+        if let Err(panic_info) = result {
+            let msg = panic_message(&panic_info);
+            yas::log_error!("{} 崩溃: {}", "{} crashed: {}", task_name_for_crash, msg);
+            if let Ok(mut guard) = status_for_crash.lock() {
+                // Only overwrite if still Running — don't clobber a proper Failed/Completed
+                if matches!(*guard, TaskStatus::Running(_)) {
+                    *guard = TaskStatus::Failed(localize(&msg));
+                }
+            }
+        }
+    })
+}
 
 /// Handle to a running background task.
 pub struct TaskHandle {
@@ -74,47 +277,35 @@ pub fn spawn_scan(state: &AppState) -> TaskHandle {
 
     let abort_hint = lang.t("鼠标右键终止", "Right-click to abort");
 
-    let handle = thread::spawn(move || {
-        log_bridge::set_thread_log_source(LogSource::Scanner);
-        let status_for_panic = status.clone();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Ensure ONNX runtime on the worker thread
-            #[cfg(target_os = "windows")]
-            {
-                if !yas_genshin::cli::check_onnxruntime() {
-                    if let Err(e) = yas_genshin::cli::download_onnxruntime() {
-                        *status.lock().unwrap() = TaskStatus::Failed(localize(&format!("{}", e)));
-                        return;
-                    }
-                }
-            }
-
-            let status_for_cb = status.clone();
-            let status_fn = move |msg: &str| {
-                let localized = localize(msg);
-                let display = format!("{}  ({})", localized, abort_hint);
-                *status_for_cb.lock().unwrap() = TaskStatus::Running(display);
-            };
-
-            match yas_genshin::cli::run_scan_core(&user_config, &scan_config, Some(&status_fn), Some(token)) {
-                Ok(path) => {
-                    let msg = match lang {
-                        Lang::Zh => format!("已导出至 {}", path),
-                        Lang::En => format!("Exported to {}", path),
-                    };
-                    *status.lock().unwrap() = TaskStatus::Completed(msg);
-                }
-                Err(e) => {
+    let handle = spawn_with_safety_net("Scanner", LogSource::Scanner, status.clone(), move |status| {
+        // Ensure ONNX runtime on the worker thread
+        #[cfg(target_os = "windows")]
+        {
+            if !yas_genshin::cli::check_onnxruntime() {
+                if let Err(e) = yas_genshin::cli::download_onnxruntime() {
                     *status.lock().unwrap() = TaskStatus::Failed(localize(&format!("{}", e)));
+                    return;
                 }
             }
-        }));
+        }
 
-        if let Err(panic_info) = result {
-            let msg = panic_message(&panic_info);
-            yas::log_error!("{}", "{}", msg);
-            if let Ok(mut guard) = status_for_panic.lock() {
-                *guard = TaskStatus::Failed(localize(&msg));
+        let status_for_cb = status.clone();
+        let status_fn = move |msg: &str| {
+            let localized = localize(msg);
+            let display = format!("{}  ({})", localized, abort_hint);
+            *status_for_cb.lock().unwrap() = TaskStatus::Running(display);
+        };
+
+        match yas_genshin::cli::run_scan_core(&user_config, &scan_config, Some(&status_fn), Some(token)) {
+            Ok(path) => {
+                let msg = match lang {
+                    Lang::Zh => format!("已导出至 {}", path),
+                    Lang::En => format!("Exported to {}", path),
+                };
+                *status.lock().unwrap() = TaskStatus::Completed(msg);
+            }
+            Err(e) => {
+                *status.lock().unwrap() = TaskStatus::Failed(localize(&format!("{}", e)));
             }
         }
     });
@@ -140,42 +331,29 @@ pub fn spawn_server(state: &AppState) -> TaskHandle {
     };
     *status.lock().unwrap() = TaskStatus::Running(msg);
 
-    let handle = thread::spawn(move || {
-        log_bridge::set_thread_log_source(LogSource::Manager);
-        let status_for_panic = status.clone();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Ensure ONNX runtime
-            #[cfg(target_os = "windows")]
-            {
-                if !yas_genshin::cli::check_onnxruntime() {
-                    if let Err(e) = yas_genshin::cli::download_onnxruntime() {
-                        *status.lock().unwrap() = TaskStatus::Failed(localize(&format!("{}", e)));
-                        return;
-                    }
-                }
-            }
-
-            match yas_genshin::cli::run_server_core(&user_config, port, None, "ppocrv4", enabled, shutdown_clone, stop_on_all_matched, dump_images) {
-                Ok(()) => {
-                    *status.lock().unwrap() = TaskStatus::Completed(
-                        lang.t("服务器已停止", "Server stopped").into(),
-                    );
-                }
-                Err(e) => {
+    let handle = spawn_with_safety_net("Server", LogSource::Manager, status.clone(), move |status| {
+        // Ensure ONNX runtime
+        #[cfg(target_os = "windows")]
+        {
+            if !yas_genshin::cli::check_onnxruntime() {
+                if let Err(e) = yas_genshin::cli::download_onnxruntime() {
                     *status.lock().unwrap() = TaskStatus::Failed(localize(&format!("{}", e)));
+                    return;
                 }
             }
-        }));
+        }
 
-        if let Err(panic_info) = result {
-            let msg = panic_message(&panic_info);
-            yas::log_error!("{}", "{}", msg);
-            if let Ok(mut guard) = status_for_panic.lock() {
-                *guard = TaskStatus::Failed(localize(&msg));
+        match yas_genshin::cli::run_server_core(&user_config, port, None, "ppocrv4", enabled, shutdown_clone, stop_on_all_matched, dump_images) {
+            Ok(()) => {
+                *status.lock().unwrap() = TaskStatus::Completed(
+                    lang.t("服务器已停止", "Server stopped").into(),
+                );
+            }
+            Err(e) => {
+                *status.lock().unwrap() = TaskStatus::Failed(localize(&format!("{}", e)));
             }
         }
     });
 
     TaskHandle { _handle: handle, shutdown: Some(shutdown), cancel_token: None }
 }
-

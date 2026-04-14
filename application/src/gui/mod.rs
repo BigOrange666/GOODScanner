@@ -8,8 +8,7 @@ pub mod manager_tab;
 pub mod capture_tab;
 pub mod log_panel;
 pub mod credits;
-
-use std::path::PathBuf;
+pub mod update_banner;
 
 use eframe::egui;
 use state::{AppState, Lang, UpdateState};
@@ -34,30 +33,10 @@ pub fn run_gui() {
     logger.init();
 
     // Kick off background update check
-    {
-        let update_state = state.update_state.clone();
-        std::thread::spawn(move || {
-            match yas_genshin::updater::check_for_update() {
-                Ok(yas_genshin::updater::UpdateStatus::UpdateAvailable {
-                    latest_version,
-                    download_url,
-                    ..
-                }) => {
-                    *update_state.lock().unwrap() = UpdateState::Available {
-                        latest_version,
-                        download_url,
-                    };
-                }
-                Ok(_) => {
-                    *update_state.lock().unwrap() = UpdateState::None;
-                }
-                Err(e) => {
-                    yas::log_debug!("更新检查失败: {}", "Update check failed: {}", e);
-                    *update_state.lock().unwrap() = UpdateState::None;
-                }
-            }
-        });
-    }
+    update_banner::spawn_check(
+        yas_genshin::updater::ASSET_SCANNER,
+        &state.update_state,
+    );
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon_64.png"))
         .expect("Failed to load window icon");
@@ -165,7 +144,7 @@ impl eframe::App for GuiApp {
         });
 
         // Update banner (between tabs and content)
-        show_update_banner(ctx, &self.state);
+        update_banner::show(ctx, self.state.lang, &self.state.update_state);
 
         // Bottom panel: per-tab log area.
         // Manager tab shows manager logs; everything else shows scanner logs
@@ -233,151 +212,6 @@ impl eframe::App for GuiApp {
             is_scan_running || is_server_running || is_capture_busy || update_busy;
         if any_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        }
-    }
-}
-
-/// Show the update notification banner when an update is available.
-fn show_update_banner(ctx: &egui::Context, state: &AppState) {
-    let l = state.lang;
-    let update_state = state.update_state.lock().unwrap().clone();
-
-    let show = !matches!(update_state, UpdateState::None | UpdateState::Checking);
-    if !show {
-        return;
-    }
-
-    egui::TopBottomPanel::top("update_banner").show(ctx, |ui| {
-        match update_state {
-            UpdateState::Available {
-                ref latest_version,
-                ref download_url,
-            } => {
-                ui.horizontal(|ui| {
-                    let current = yas_genshin::updater::current_version_display();
-                    ui.label(
-                        egui::RichText::new(l.t(
-                            &format!("发现新版本: {} → {}", current, latest_version),
-                            &format!("Update available: {} → {}", current, latest_version),
-                        ))
-                        .color(egui::Color32::from_rgb(255, 200, 50)),
-                    );
-                    if ui.button(l.t("下载更新", "Download Update")).clicked() {
-                        let update_state_arc = state.update_state.clone();
-                        let url = download_url.clone();
-                        let lang = l;
-                        *state.update_state.lock().unwrap() = UpdateState::Downloading;
-                        std::thread::spawn(move || {
-                            match yas_genshin::updater::download_and_replace(&url) {
-                                Ok(exe_path) => {
-                                    *update_state_arc.lock().unwrap() =
-                                        UpdateState::ShowingDialog;
-                                    show_restart_dialog(exe_path, update_state_arc, lang);
-                                }
-                                Err(e) => {
-                                    *update_state_arc.lock().unwrap() =
-                                        UpdateState::Failed(format!("{}", e));
-                                }
-                            }
-                        });
-                    }
-                    if ui.button(l.t("跳过", "Skip")).clicked() {
-                        *state.update_state.lock().unwrap() = UpdateState::None;
-                    }
-                });
-            }
-            UpdateState::Downloading => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(l.t("正在下载更新...", "Downloading update..."));
-                });
-                ctx.request_repaint_after(std::time::Duration::from_millis(200));
-            }
-            UpdateState::ShowingDialog => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(
-                        egui::RichText::new(l.t(
-                            "更新已就绪...",
-                            "Update ready...",
-                        ))
-                        .color(egui::Color32::from_rgb(100, 255, 100)),
-                    );
-                });
-            }
-            UpdateState::Ready => {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(l.t(
-                            "更新已就绪，请重启程序。",
-                            "Update ready. Please restart the application.",
-                        ))
-                        .color(egui::Color32::from_rgb(100, 255, 100)),
-                    );
-                });
-            }
-            UpdateState::Failed(ref msg) => {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(l.t(
-                            &format!("更新失败: {}", msg),
-                            &format!("Update failed: {}", msg),
-                        ))
-                        .color(egui::Color32::from_rgb(255, 100, 100)),
-                    );
-                    if ui.button(l.t("关闭", "Dismiss")).clicked() {
-                        *state.update_state.lock().unwrap() = UpdateState::None;
-                    }
-                });
-            }
-            _ => {}
-        }
-    });
-}
-
-/// Show a native OS dialog asking the user to restart now or later.
-/// Called from the download background thread (blocking is fine).
-fn show_restart_dialog(
-    exe_path: PathBuf,
-    update_state: std::sync::Arc<std::sync::Mutex<UpdateState>>,
-    lang: Lang,
-) {
-    let (title, description) = match lang {
-        Lang::Zh => (
-            "更新完成",
-            "更新已下载完成。是否立即重启？",
-        ),
-        Lang::En => (
-            "Update Complete",
-            "The update has been downloaded. Restart now?",
-        ),
-    };
-
-    let result = rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Info)
-        .set_title(title)
-        .set_description(description)
-        .set_buttons(rfd::MessageButtons::YesNo)
-        .show();
-
-    match result {
-        rfd::MessageDialogResult::Yes => {
-            yas::log_info!("用户选择立即重启", "User chose to restart now");
-            match std::process::Command::new(&exe_path).spawn() {
-                Ok(_) => std::process::exit(0),
-                Err(e) => {
-                    yas::log_error!(
-                        "启动新版本失败: {}",
-                        "Failed to launch new version: {}",
-                        e
-                    );
-                    *update_state.lock().unwrap() = UpdateState::Ready;
-                }
-            }
-        }
-        _ => {
-            yas::log_info!("用户选择稍后重启", "User chose to restart later");
-            *update_state.lock().unwrap() = UpdateState::Ready;
         }
     }
 }

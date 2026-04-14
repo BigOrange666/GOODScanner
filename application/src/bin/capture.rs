@@ -12,10 +12,13 @@ use eframe::egui;
 use yas_application::gui::capture_tab::CaptureTabState;
 use yas_application::gui::log_bridge;
 use yas_application::gui::log_panel;
-use yas_application::gui::state::{Lang, LogEntry};
-use yas_application::gui::{capture_tab, credits, state};
+use yas_application::gui::state::{Lang, LogEntry, UpdateState};
+use yas_application::gui::{capture_tab, credits, state, update_banner};
 
 fn main() {
+    // Clean up leftover .old exe from a previous update
+    yas_genshin::updater::cleanup_old_exe();
+
     let lang = {
         let cfg = yas_genshin::cli::load_config_or_default();
         state::Lang::from_str(&cfg.lang)
@@ -29,6 +32,13 @@ fn main() {
     // Init GUI logger
     let logger = log_bridge::GuiLogger::new(log_lines.clone(), manager_log_lines, 2000);
     logger.init();
+
+    // Kick off background update check
+    let update_state = Arc::new(Mutex::new(UpdateState::Checking));
+    update_banner::spawn_check(
+        yas_genshin::updater::ASSET_CAPTURE,
+        &update_state,
+    );
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon_64.png"))
         .expect("Failed to load window icon");
@@ -53,6 +63,7 @@ fn main() {
                 active_tab: ActiveTab::Capture,
                 log_lines,
                 capture_tab: CaptureTabState::new(output_dir),
+                update_state,
             }))
         }),
     )
@@ -70,6 +81,7 @@ struct CaptureApp {
     active_tab: ActiveTab,
     log_lines: Arc<Mutex<Vec<LogEntry>>>,
     capture_tab: CaptureTabState,
+    update_state: Arc<Mutex<UpdateState>>,
 }
 
 impl eframe::App for CaptureApp {
@@ -107,6 +119,9 @@ impl eframe::App for CaptureApp {
             });
         });
 
+        // Update banner (between tabs and content)
+        update_banner::show(ctx, l, &self.update_state);
+
         // Bottom panel: log area
         egui::TopBottomPanel::bottom("logs")
             .min_height(100.0)
@@ -128,8 +143,12 @@ impl eframe::App for CaptureApp {
             }
         });
 
-        // Request repaint while capture is busy
-        if self.capture_tab.is_busy() {
+        // Request repaint while capture or update is busy
+        let update_busy = matches!(
+            *self.update_state.lock().unwrap(),
+            UpdateState::Checking | UpdateState::Downloading | UpdateState::ShowingDialog,
+        );
+        if self.capture_tab.is_busy() || update_busy {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }

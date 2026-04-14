@@ -6292,6 +6292,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "windows-sys 0.59.0",
  "winres",
  "yas_core",
  "yas_scanner_genshin",

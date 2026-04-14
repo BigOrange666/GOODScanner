@@ -19,8 +19,10 @@ use anyhow::{anyhow, Result};
 use yas::{log_debug, log_info, log_warn};
 use serde::Deserialize;
 
-/// Asset filename to look for in each release.
-const ASSET_NAME: &str = "GOODScanner.exe";
+/// Asset filename for the OCR scanner binary.
+pub const ASSET_SCANNER: &str = "GOODScanner.exe";
+/// Asset filename for the packet capture binary.
+pub const ASSET_CAPTURE: &str = "GOODCapture.exe";
 
 /// Download mirror prefixes, tried in order.  Empty string = direct GitHub.
 const DOWNLOAD_MIRRORS: &[&str] = &[
@@ -217,7 +219,12 @@ fn extract_tag_from_url(url: &str) -> Option<&str> {
 /// Tries the REST API first (structured, fast), then falls back to the
 /// redirect-based approach through download mirrors (works in China when
 /// `api.github.com` is blocked).
-pub fn check_for_update() -> Result<UpdateStatus> {
+/// Query GitHub for the latest release and compare with the running version.
+///
+/// `asset_name` selects which binary to check for (e.g. [`ASSET_SCANNER`] or
+/// [`ASSET_CAPTURE`]).  The download URL in [`UpdateStatus::UpdateAvailable`]
+/// points to that specific asset.
+pub fn check_for_update(asset_name: &str) -> Result<UpdateStatus> {
     let current_int = match current_version_int() {
         Some(v) => v,
         None => return Ok(UpdateStatus::DevBuild),
@@ -245,7 +252,7 @@ pub fn check_for_update() -> Result<UpdateStatus> {
     // Construct download URL from tag (don't rely on API assets list)
     let download_url = format!(
         "https://github.com/Anyrainel/GOODScanner/releases/download/{}/{}",
-        latest_tag, ASSET_NAME,
+        latest_tag, asset_name,
     );
 
     Ok(UpdateStatus::UpdateAvailable {
@@ -259,13 +266,29 @@ pub fn check_for_update() -> Result<UpdateStatus> {
 
 /// Delete the leftover `.old` executable from a previous update.
 /// Safe to call unconditionally at every startup.
+///
+/// On Windows the old process may still be exiting when the new one starts
+/// (after the "restart now?" dialog), so the file may be locked briefly.
+/// We retry a few times with a short delay before giving up.
 pub fn cleanup_old_exe() {
     if let Ok(exe) = std::env::current_exe() {
         let old = exe.with_extension("exe.old");
-        if old.exists() {
+        if !old.exists() {
+            return;
+        }
+        for attempt in 0..5 {
             match std::fs::remove_file(&old) {
-                Ok(()) => log_debug!("已清理旧版本", "Cleaned up old exe"),
-                Err(e) => log_debug!("清理旧版本失败: {}", "Failed to clean up old exe: {}", e),
+                Ok(()) => {
+                    log_debug!("已清理旧版本", "Cleaned up old exe");
+                    return;
+                }
+                Err(e) => {
+                    if attempt < 4 {
+                        std::thread::sleep(Duration::from_millis(500));
+                    } else {
+                        log_debug!("清理旧版本失败: {}", "Failed to clean up old exe: {}", e);
+                    }
+                }
             }
         }
     }
