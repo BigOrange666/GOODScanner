@@ -60,6 +60,9 @@ pub struct CaptureTabState {
     pub min_artifact_rarity: u32,
     pub min_weapon_rarity: u32,
     pub output_dir: String,
+
+    // Advanced
+    pub dump_packets: bool,
 }
 
 impl CaptureTabState {
@@ -75,6 +78,7 @@ impl CaptureTabState {
             min_artifact_rarity: 4,
             min_weapon_rarity: 3,
             output_dir,
+            dump_packets: false,
         }
     }
 
@@ -90,6 +94,7 @@ impl CaptureTabState {
 fn spawn_capture(
     capture_state: Arc<Mutex<CaptureState>>,
     cmd_tx_out: &mut Option<tokio::sync::mpsc::UnboundedSender<CaptureCommand>>,
+    dump_packets: bool,
 ) -> std::thread::JoinHandle<()> {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     *cmd_tx_out = Some(cmd_tx.clone());
@@ -112,20 +117,22 @@ fn spawn_capture(
         };
 
         rt.block_on(async {
-            let monitor =
-                match yas_genshin::capture::monitor::CaptureMonitor::new(state.clone()) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        log::error!(
-                            "初始化抓包监控失败: {} / Failed to initialize capture monitor: {}",
-                            e, e
-                        );
-                        if let Ok(mut s) = state.lock() {
-                            s.error = Some(format!("{}", e));
-                        }
-                        return;
+            let monitor = match yas_genshin::capture::monitor::CaptureMonitor::new(
+                state.clone(),
+                dump_packets,
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::error!(
+                        "初始化抓包监控失败: {} / Failed to initialize capture monitor: {}",
+                        e, e
+                    );
+                    if let Ok(mut s) = state.lock() {
+                        s.error = Some(format!("{}", e));
                     }
-                };
+                    return;
+                }
+            };
 
             // Initialization succeeded — immediately start capture
             let _ = cmd_tx.send(CaptureCommand::StartCapture);
@@ -174,7 +181,7 @@ pub fn show(
                 {
                     tab.capture_state = Arc::new(Mutex::new(CaptureState::default()));
                     let mut cmd_tx = None;
-                    let thread = spawn_capture(tab.capture_state.clone(), &mut cmd_tx);
+                    let thread = spawn_capture(tab.capture_state.clone(), &mut cmd_tx, tab.dump_packets);
                     tab.handle = Some(CaptureHandle {
                         _thread: thread,
                         cmd_tx: cmd_tx.unwrap(),
@@ -302,7 +309,7 @@ pub fn show(
 
     // === Config section (always visible) ===
     egui::CollapsingHeader::new(l.t("导出设置", "Export Settings"))
-        .default_open(false)
+        .default_open(true)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut tab.include_characters, l.t("角色", "Characters"));
@@ -320,6 +327,19 @@ pub fn show(
                 ui.label(l.t("最低圣遗物稀有度:", "Min artifact rarity:"));
                 ui.add(egui::Slider::new(&mut tab.min_artifact_rarity, 1..=5));
             });
+        });
+
+    // === Advanced settings ===
+    egui::CollapsingHeader::new(l.t("高级设置", "Advanced"))
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.checkbox(
+                &mut tab.dump_packets,
+                l.t(
+                    "转储所有解密数据包 → debug_capture/",
+                    "Dump all decrypted packets → debug_capture/",
+                ),
+            );
         });
 }
 
