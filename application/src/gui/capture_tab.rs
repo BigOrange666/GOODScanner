@@ -104,31 +104,15 @@ fn spawn_capture(
     let state = capture_state.clone();
 
     std::thread::spawn(move || {
-        let rt = match tokio::runtime::Runtime::new() {
-            Ok(rt) => rt,
-            Err(e) => {
-                yas::log_error!(
-                    "创建运行时失败: {}",
-                    "Failed to create runtime: {}",
-                    e
-                );
-                if let Ok(mut s) = state.lock() {
-                    s.error = Some(format!("{}", e));
-                }
-                return;
-            }
-        };
+        let state_for_crash = state.clone();
 
-        rt.block_on(async {
-            let monitor = match yas_genshin::capture::monitor::CaptureMonitor::new(
-                state.clone(),
-                dump_packets,
-            ) {
-                Ok(m) => m,
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
                 Err(e) => {
                     yas::log_error!(
-                        "初始化抓包监控失败: {}",
-                        "Failed to initialize capture monitor: {}",
+                        "创建运行时失败: {}",
+                        "Failed to create runtime: {}",
                         e
                     );
                     if let Ok(mut s) = state.lock() {
@@ -138,11 +122,45 @@ fn spawn_capture(
                 }
             };
 
-            // Initialization succeeded — immediately start capture
-            let _ = cmd_tx.send(CaptureCommand::StartCapture);
+            rt.block_on(async {
+                let monitor = match yas_genshin::capture::monitor::CaptureMonitor::new(
+                    state.clone(),
+                    dump_packets,
+                ) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        yas::log_error!(
+                            "初始化抓包监控失败: {}",
+                            "Failed to initialize capture monitor: {}",
+                            e
+                        );
+                        if let Ok(mut s) = state.lock() {
+                            s.error = Some(format!("{}", e));
+                        }
+                        return;
+                    }
+                };
 
-            monitor.run(cmd_rx).await;
-        });
+                // Initialization succeeded — immediately start capture
+                let _ = cmd_tx.send(CaptureCommand::StartCapture);
+
+                monitor.run(cmd_rx).await;
+            });
+        }));
+
+        if let Err(panic_info) = result {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                format!("Capture crashed: {}", s)
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                format!("Capture crashed: {}", s)
+            } else {
+                "Capture crashed (unknown panic)".to_string()
+            };
+            yas::log_error!("抓包崩溃: {}", "Capture crashed: {}", msg);
+            if let Ok(mut s) = state_for_crash.lock() {
+                s.error = Some(msg);
+            }
+        }
     })
 }
 

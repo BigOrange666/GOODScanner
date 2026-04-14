@@ -19,6 +19,10 @@ fn main() {
     // Clean up leftover .old exe from a previous update
     yas_genshin::updater::cleanup_old_exe();
 
+    // Install global SEH handler early — protects all threads.
+    #[cfg(target_os = "windows")]
+    yas_application::gui::worker::install_seh_handler();
+
     let lang = {
         let cfg = yas_genshin::cli::load_config_or_default();
         state::Lang::from_str(&cfg.lang)
@@ -32,6 +36,18 @@ fn main() {
     // Init GUI logger
     let logger = log_bridge::GuiLogger::new(log_lines.clone(), manager_log_lines, 2000);
     logger.init();
+
+    // Panic hook: write panics to log (stderr is invisible in GUI mode)
+    std::panic::set_hook(Box::new(|info| {
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown".to_string()
+        };
+        log::error!("Capture panicked: {}", payload);
+    }));
 
     // Kick off background update check
     let update_state = Arc::new(Mutex::new(UpdateState::Checking));

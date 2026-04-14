@@ -19,6 +19,10 @@ pub fn run_gui() {
     // Clean up leftover .old exe from a previous update
     yas_genshin::updater::cleanup_old_exe();
 
+    // Install global SEH handler early — protects ALL threads including main.
+    #[cfg(target_os = "windows")]
+    worker::install_seh_handler();
+
     let state = AppState::new();
 
     // Set global language from config
@@ -31,6 +35,11 @@ pub fn run_gui() {
         2000,
     );
     logger.init();
+
+    // Install a panic hook that writes to the log file (the default hook
+    // writes to stderr, which GUI users never see).  This covers panics on
+    // ALL threads — worker, update, refresh, and GUI main.
+    install_panic_hook();
 
     // Kick off background update check
     update_banner::spawn_check(
@@ -58,6 +67,31 @@ pub fn run_gui() {
         }),
     )
     .unwrap();
+}
+
+/// Replace the default panic hook so panics on ANY thread are written
+/// to the `log::error!` logger (visible in the GUI log panel + log file).
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown".to_string()
+        };
+        let location = info
+            .location()
+            .map(|l| format!(" at {}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_default();
+        log::error!(
+            "{}",
+            yas::lang::localize(&format!(
+                "程序崩溃: {}{} / Program panicked: {}{}",
+                payload, location, payload, location,
+            ))
+        );
+    }));
 }
 
 #[derive(PartialEq)]

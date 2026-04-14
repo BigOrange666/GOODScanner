@@ -113,23 +113,25 @@ mod seh_guard {
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
-        // Check if this thread is a guarded worker
+        // Check if this thread is a guarded worker.
+        //
+        // SAFETY constraints inside this handler:
+        //   - Use try_lock (not lock) — the thread may have crashed while
+        //     holding the status mutex; blocking here would deadlock.
+        //   - Use a static description string (no heap allocation) — the
+        //     crash may be heap corruption, making `format!` unsafe.
         let handled = SEH_STATUS.with(|s| {
             let guard = s.borrow();
             if let Some(ref status) = *guard {
-                let name = SEH_TASK_NAME.with(|n| n.borrow().clone());
                 let desc = exception_name(code);
-                let hex = code as u32;
-                let msg = format!(
-                    "{} 崩溃 (0x{:08X}: {}) / {} crashed (0x{:08X}: {})",
-                    name, hex, desc, name, hex, desc,
-                );
 
-                // Best-effort status update (mutex might be poisoned)
-                if let Ok(mut st) = status.lock() {
+                // Best-effort status update — try_lock avoids deadlock if
+                // the mutex was held when the crash occurred.
+                if let Ok(mut st) = status.try_lock() {
                     if matches!(*st, TaskStatus::Running(_)) {
+                        // Use the static description only (no heap-allocating format!).
                         *st = TaskStatus::Failed(
-                            yas::lang::localize(&msg),
+                            yas::lang::localize(desc),
                         );
                     }
                 }
@@ -156,6 +158,13 @@ mod seh_guard {
 
         EXCEPTION_CONTINUE_EXECUTION
     }
+}
+
+/// Install the global SEH handler.  Call once at startup to protect all
+/// threads (including main) against fatal Windows exceptions.
+#[cfg(target_os = "windows")]
+pub fn install_seh_handler() {
+    seh_guard::install_global_handler();
 }
 
 /// Run a closure on a background thread with comprehensive error handling:
