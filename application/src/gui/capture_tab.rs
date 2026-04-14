@@ -152,30 +152,165 @@ pub fn show(
     tab: &mut CaptureTabState,
     game_busy: bool,
 ) {
-
     // --- Phase transitions driven by shared state ---
     update_phase(tab, l);
 
-    ui.add_space(4.0);
-    ui.label(l.t(
-        "通过抓包获取游戏数据（角色/武器/圣遗物），需管理员权限。",
-        "Capture game data (characters/weapons/artifacts) via packet sniffing. Requires admin.",
-    ));
-    ui.add_space(8.0);
+    let is_busy = tab.is_busy();
 
-    // === Main action area ===
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        match &tab.phase {
-            Phase::Idle => {
-                if game_busy {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(255, 200, 50),
+    // === Action bar (always visible at top) ===
+    ui.add_space(4.0);
+    action_bar(ui, l, tab, game_busy);
+    if !is_busy {
+        ui.colored_label(
+            egui::Color32::from_rgb(120, 120, 120),
+            l.t(
+                "通过抓包获取游戏数据（角色/武器/圣遗物），需管理员权限。",
+                "Capture game data (characters/weapons/artifacts) via packet sniffing. Requires admin.",
+            ),
+        );
+    }
+    ui.add_space(4.0);
+    ui.separator();
+
+    // === Scrollable config area ===
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.add_space(4.0);
+
+            // === Export Settings ===
+            egui::CollapsingHeader::new(l.t("导出设置", "Export Settings"))
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.add_enabled_ui(!is_busy, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut tab.include_characters, l.t("角色", "Characters"));
+                            ui.add_space(12.0);
+                            ui.checkbox(&mut tab.include_weapons, l.t("武器", "Weapons"));
+                            ui.add_space(12.0);
+                            ui.checkbox(&mut tab.include_artifacts, l.t("圣遗物", "Artifacts"));
+                        });
+
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(l.t("最低武器稀有度:", "Min weapon rarity:"));
+                            ui.add(egui::Slider::new(&mut tab.min_weapon_rarity, 1..=5));
+                            ui.add_space(16.0);
+                            ui.label(l.t("最低圣遗物稀有度:", "Min artifact rarity:"));
+                            ui.add(egui::Slider::new(&mut tab.min_artifact_rarity, 1..=5));
+                        });
+                    });
+                });
+
+            // === Advanced settings ===
+            egui::CollapsingHeader::new(l.t("高级设置", "Advanced"))
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.checkbox(
+                        &mut tab.dump_packets,
                         l.t(
-                            "其他任务正在运行，请等待完成",
-                            "Another task is running. Please wait for it to finish.",
+                            "转储所有解密数据包 → debug_capture/",
+                            "Dump all decrypted packets → debug_capture/",
                         ),
                     );
-                }
+
+                    tab.data_cache_refresh.poll();
+                    ui.horizontal(|ui| {
+                        let busy = tab.data_cache_refresh.is_running();
+                        if ui.add_enabled(!busy, egui::Button::new(
+                            l.t("刷新游戏数据缓存", "Refresh game data"),
+                        )).clicked() {
+                            tab.data_cache_refresh = state::RefreshState::Running(
+                                std::thread::spawn(|| {
+                                    yas_genshin::capture::data_cache::force_refresh()
+                                        .map_err(|e| format!("{}", e))
+                                }),
+                            );
+                        }
+                        match &tab.data_cache_refresh {
+                            state::RefreshState::Ok => {
+                                ui.colored_label(egui::Color32::GREEN, "OK");
+                            }
+                            state::RefreshState::Failed(msg) => {
+                                ui.colored_label(egui::Color32::RED, msg.as_str());
+                            }
+                            state::RefreshState::Running(_) => {
+                                ui.spinner();
+                            }
+                            state::RefreshState::Idle => {}
+                        }
+                    });
+                });
+
+            // === Help / FAQ ===
+            egui::CollapsingHeader::new(l.t("使用说明", "How to use"))
+                .default_open(false)
+                .show(ui, |ui| {
+                    let steps = match l {
+                        Lang::Zh => &[
+                            "1. 点击「开始抓包」后，软件开始监听网络数据包。",
+                            "2. 如果游戏已在运行，请关闭并重新启动，登录进入游戏（过门）。",
+                            "3. 软件会在收到角色和物品数据后自动停止并导出 JSON 文件。",
+                            "4. 导出的文件可直接导入到 ggartifact.com 等工具中使用。",
+                        ] as &[&str],
+                        Lang::En => &[
+                            "1. Click 'Start Capture' to begin listening for network packets.",
+                            "2. If the game is already running, close it, relaunch, and log in (enter door).",
+                            "3. Once character and item data are received, capture stops automatically and exports a JSON file.",
+                            "4. The exported file can be imported directly into ggartifact.com and similar tools.",
+                        ],
+                    };
+                    for step in steps {
+                        ui.label(*step);
+                    }
+                });
+
+            egui::CollapsingHeader::new(l.t("杀毒软件误报说明", "Antivirus false positive info"))
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(l.t(
+                        "本程序使用网络抓包（pktmon）来读取游戏数据。\n\
+                         某些杀毒软件可能会将此行为标记为可疑。\n\
+                         这是误报——本程序不会修改游戏文件或内存，\n\
+                         仅被动读取网络流量。",
+                        "This program uses packet capture (pktmon) to read game data.\n\
+                         Some antivirus software may flag this behavior as suspicious.\n\
+                         This is a false positive — the program does not modify game\n\
+                         files or memory; it only passively reads network traffic.",
+                    ));
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(l.t(
+                            "如果被拦截，请将本程序添加到杀毒软件的白名单中。",
+                            "If blocked, please add this program to your antivirus whitelist.",
+                        ))
+                        .weak()
+                        .size(11.0),
+                    );
+                });
+        });
+}
+
+/// Top action bar: start/stop button + inline status.
+fn action_bar(
+    ui: &mut egui::Ui,
+    l: Lang,
+    tab: &mut CaptureTabState,
+    game_busy: bool,
+) {
+    match &tab.phase {
+        Phase::Idle => {
+            if game_busy {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 200, 50),
+                    l.t(
+                        "其他任务正在运行，请等待完成",
+                        "Another task is running. Please wait for it to finish.",
+                    ),
+                );
+            }
+
+            ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
                         !game_busy,
@@ -192,186 +327,141 @@ pub fn show(
                     });
                     tab.phase = Phase::Initializing;
                 }
-            }
+            });
+        }
 
-            Phase::Initializing => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(l.t(
-                        "正在初始化（下载数据缓存）...",
-                        "Initializing (downloading data cache)...",
-                    ));
-                });
-            }
-
-            Phase::Waiting => {
-                ui.horizontal(|ui| {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(100, 200, 100),
-                        "●",
-                    );
-                    ui.label(l.t(
-                        "正在等待游戏数据... 请关闭游戏并重新启动，登录（过门）。",
-                        "Waiting for game data... Please close the game, relaunch, and log in (enter door).",
-                    ));
-                });
-
-                // Show partial progress
-                if let Ok(cs) = tab.capture_state.lock() {
-                    if cs.has_characters || cs.has_items {
-                        ui.add_space(4.0);
-                        let mut parts = Vec::new();
-                        if cs.has_characters {
-                            parts.push(match l {
-                                Lang::Zh => format!("角色: {}", cs.character_count),
-                                Lang::En => format!("Characters: {}", cs.character_count),
-                            });
-                        }
-                        if cs.has_items {
-                            parts.push(match l {
-                                Lang::Zh => format!(
-                                    "武器: {}, 圣遗物: {}",
-                                    cs.weapon_count, cs.artifact_count
-                                ),
-                                Lang::En => format!(
-                                    "Weapons: {}, Artifacts: {}",
-                                    cs.weapon_count, cs.artifact_count
-                                ),
-                            });
-                        }
-                        ui.colored_label(
-                            egui::Color32::from_rgb(100, 200, 100),
-                            parts.join("  |  "),
-                        );
-
-                        let missing = match (cs.has_characters, cs.has_items) {
-                            (true, false) => Some(l.t(
-                                "等待物品数据...",
-                                "Waiting for item data...",
-                            )),
-                            (false, true) => Some(l.t(
-                                "等待角色数据...",
-                                "Waiting for character data...",
-                            )),
-                            _ => None,
-                        };
-                        if let Some(hint) = missing {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(255, 200, 50),
-                                hint,
-                            );
-                        }
+        Phase::Initializing => {
+            ui.horizontal(|ui| {
+                if ui.button(l.t("⏹ 停止抓包", "⏹ Stop Capture")).clicked() {
+                    if let Some(ref h) = tab.handle {
+                        h.send(CaptureCommand::StopCapture);
                     }
+                    tab.phase = Phase::Idle;
+                    tab.handle = None;
                 }
-            }
+                ui.spinner();
+                ui.label(l.t(
+                    "正在初始化（下载数据缓存）...",
+                    "Initializing (downloading data cache)...",
+                ));
+            });
+        }
 
-            Phase::Exporting => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(l.t("正在导出...", "Exporting..."));
-                });
-            }
-
-            Phase::Done { summary, path } => {
+        Phase::Waiting => {
+            ui.horizontal(|ui| {
+                if ui.button(l.t("⏹ 停止抓包", "⏹ Stop Capture")).clicked() {
+                    if let Some(ref h) = tab.handle {
+                        h.send(CaptureCommand::StopCapture);
+                    }
+                    tab.phase = Phase::Idle;
+                    tab.handle = None;
+                }
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 200, 100),
-                    summary.as_str(),
+                    l.t(
+                        "● 正在等待游戏数据...",
+                        "● Waiting for game data...",
+                    ),
                 );
-                ui.label(
-                    egui::RichText::new(format!("→ {}", path))
-                        .size(11.0)
-                        .weak(),
-                );
-                ui.add_space(4.0);
-                if ui
-                    .button(l.t("↻ 重新抓包", "↻ Recapture"))
-                    .clicked()
-                {
-                    tab.phase = Phase::Idle;
-                    tab.handle = None;
-                }
-            }
-
-            Phase::Failed(msg) => {
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 100, 100),
-                    msg.as_str(),
-                );
-                ui.add_space(4.0);
-                if ui
-                    .button(l.t("↻ 重试", "↻ Retry"))
-                    .clicked()
-                {
-                    tab.phase = Phase::Idle;
-                    tab.handle = None;
-                }
-            }
-        }
-    });
-
-    ui.add_space(12.0);
-
-    // === Config section (always visible) ===
-    egui::CollapsingHeader::new(l.t("导出设置", "Export Settings"))
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut tab.include_characters, l.t("角色", "Characters"));
-                ui.add_space(12.0);
-                ui.checkbox(&mut tab.include_weapons, l.t("武器", "Weapons"));
-                ui.add_space(12.0);
-                ui.checkbox(&mut tab.include_artifacts, l.t("圣遗物", "Artifacts"));
             });
 
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(l.t("最低武器稀有度:", "Min weapon rarity:"));
-                ui.add(egui::Slider::new(&mut tab.min_weapon_rarity, 1..=5));
-                ui.add_space(16.0);
-                ui.label(l.t("最低圣遗物稀有度:", "Min artifact rarity:"));
-                ui.add(egui::Slider::new(&mut tab.min_artifact_rarity, 1..=5));
-            });
-        });
-
-    // === Advanced settings ===
-    egui::CollapsingHeader::new(l.t("高级设置", "Advanced"))
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.checkbox(
-                &mut tab.dump_packets,
+            ui.colored_label(
+                egui::Color32::from_rgb(120, 120, 120),
                 l.t(
-                    "转储所有解密数据包 → debug_capture/",
-                    "Dump all decrypted packets → debug_capture/",
+                    "请关闭游戏并重新启动，登录（过门）。",
+                    "Please close the game, relaunch, and log in (enter door).",
                 ),
             );
 
-            tab.data_cache_refresh.poll();
-            ui.horizontal(|ui| {
-                let busy = tab.data_cache_refresh.is_running();
-                if ui.add_enabled(!busy, egui::Button::new(
-                    l.t("刷新游戏数据缓存", "Refresh game data"),
-                )).clicked() {
-                    tab.data_cache_refresh = state::RefreshState::Running(
-                        std::thread::spawn(|| {
-                            yas_genshin::capture::data_cache::force_refresh()
-                                .map_err(|e| format!("{}", e))
-                        }),
+            // Show partial progress
+            if let Ok(cs) = tab.capture_state.lock() {
+                if cs.has_characters || cs.has_items {
+                    let mut parts = Vec::new();
+                    if cs.has_characters {
+                        parts.push(match l {
+                            Lang::Zh => format!("角色: {}", cs.character_count),
+                            Lang::En => format!("Characters: {}", cs.character_count),
+                        });
+                    }
+                    if cs.has_items {
+                        parts.push(match l {
+                            Lang::Zh => format!(
+                                "武器: {}, 圣遗物: {}",
+                                cs.weapon_count, cs.artifact_count
+                            ),
+                            Lang::En => format!(
+                                "Weapons: {}, Artifacts: {}",
+                                cs.weapon_count, cs.artifact_count
+                            ),
+                        });
+                    }
+                    ui.colored_label(
+                        egui::Color32::from_rgb(100, 200, 100),
+                        parts.join("  |  "),
                     );
+
+                    let missing = match (cs.has_characters, cs.has_items) {
+                        (true, false) => Some(l.t(
+                            "等待物品数据...",
+                            "Waiting for item data...",
+                        )),
+                        (false, true) => Some(l.t(
+                            "等待角色数据...",
+                            "Waiting for character data...",
+                        )),
+                        _ => None,
+                    };
+                    if let Some(hint) = missing {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 200, 50),
+                            hint,
+                        );
+                    }
                 }
-                match &tab.data_cache_refresh {
-                    state::RefreshState::Ok => {
-                        ui.colored_label(egui::Color32::GREEN, "OK");
-                    }
-                    state::RefreshState::Failed(msg) => {
-                        ui.colored_label(egui::Color32::RED, msg.as_str());
-                    }
-                    state::RefreshState::Running(_) => {
-                        ui.spinner();
-                    }
-                    state::RefreshState::Idle => {}
-                }
+            }
+        }
+
+        Phase::Exporting => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(l.t("正在导出...", "Exporting..."));
             });
-        });
+        }
+
+        Phase::Done { summary, path } => {
+            let summary = summary.clone();
+            let path = path.clone();
+            ui.horizontal(|ui| {
+                if ui.button(l.t("↻ 重新抓包", "↻ Recapture")).clicked() {
+                    tab.phase = Phase::Idle;
+                    tab.handle = None;
+                }
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 200, 100),
+                    &summary,
+                );
+            });
+            ui.label(
+                egui::RichText::new(format!("→ {}", path))
+                    .size(11.0)
+                    .weak(),
+            );
+        }
+
+        Phase::Failed(msg) => {
+            let msg = msg.clone();
+            ui.horizontal(|ui| {
+                if ui.button(l.t("↻ 重试", "↻ Retry")).clicked() {
+                    tab.phase = Phase::Idle;
+                    tab.handle = None;
+                }
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 100, 100),
+                    &msg,
+                );
+            });
+        }
+    }
 }
 
 /// Drive phase transitions based on shared capture state.

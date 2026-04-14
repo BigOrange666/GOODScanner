@@ -114,9 +114,9 @@ fn action_bar(
         ui.add_space(12.0);
 
         if scan_running && !is_server_running {
-            ui.add_enabled(false, egui::Button::new(l.t("▶ 启动", "▶ Start")));
+            ui.add_enabled(false, egui::Button::new(l.t("▶ 启动HTTP服务器", "▶ Start HTTP Server")));
         } else if is_server_running {
-            if ui.button(l.t("■ 停止", "■ Stop")).clicked() {
+            if ui.button(l.t("■ 停止服务器", "■ Stop Server")).clicked() {
                 if let Some(ref h) = server_handle {
                     h.stop();
                 }
@@ -136,7 +136,7 @@ fn action_bar(
                 );
             }
         } else {
-            if ui.button(l.t("▶ 启动", "▶ Start")).clicked() {
+            if ui.button(l.t("▶ 启动HTTP服务器", "▶ Start HTTP Server")).clicked() {
                 state.server_enabled.store(true, Ordering::Relaxed);
                 // Force immediate save before starting server
                 if let Err(e) = yas_genshin::cli::save_config(&state.user_config) {
