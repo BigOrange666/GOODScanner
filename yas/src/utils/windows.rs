@@ -61,18 +61,37 @@ pub fn find_window_cloud() -> Result<HWND> {
 }
 
 unsafe fn get_client_rect_unsafe(hwnd: HWND) -> Result<Rect<i32>> {
+    // Verify the window handle is still valid — the game may have closed
+    // between window enumeration and this call.
+    if IsWindow(hwnd) == 0 {
+        return Err(anyhow!(
+            "游戏窗口已关闭或无效，请确认游戏仍在运行 / \
+             Game window is no longer valid. Please make sure the game is still running."
+        ));
+    }
+
     let mut rect: RECT = RECT {
         left: 0,
         top: 0,
         right: 0,
         bottom: 0,
     };
-    GetClientRect(hwnd, &mut rect);
+    if GetClientRect(hwnd, &mut rect) == 0 {
+        return Err(anyhow!(
+            "无法获取游戏窗口大小（GetClientRect 失败） / \
+             Cannot get game window size (GetClientRect failed)"
+        ));
+    }
     let width: i32 = rect.right;
     let height: i32 = rect.bottom;
 
     let mut point: POINT = POINT { x: 0, y: 0 };
-    ClientToScreen(hwnd, &mut point as *mut POINT);
+    if ClientToScreen(hwnd, &mut point as *mut POINT) == 0 {
+        return Err(anyhow!(
+            "无法获取游戏窗口位置（ClientToScreen 失败） / \
+             Cannot get game window position (ClientToScreen failed)"
+        ));
+    }
     let left: i32 = point.x;
     let top: i32 = point.y;
 
