@@ -53,15 +53,32 @@ const ORT_DOWNLOAD_URLS: &[&str] = &[
     "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip",
 ];
 
+/// Minimum expected size for onnxruntime.dll (v1.22.0 x64 is ~12.6 MB).
+/// Anything smaller is almost certainly a corrupted or partial download.
+#[cfg(target_os = "windows")]
+const ORT_DLL_MIN_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
+
 /// Check if ONNX Runtime is available. Returns true if found, false if download needed.
+/// Also detects corrupted/truncated files by checking the DLL size.
 #[cfg(target_os = "windows")]
 pub fn check_onnxruntime() -> bool {
     let dll_path = exe_dir().join(ORT_DLL_NAME);
-    if dll_path.exists() {
-        std::env::set_var("ORT_DYLIB_PATH", &dll_path);
-        true
-    } else {
-        false
+    match std::fs::metadata(&dll_path) {
+        Ok(meta) if meta.len() >= ORT_DLL_MIN_SIZE => {
+            std::env::set_var("ORT_DYLIB_PATH", &dll_path);
+            true
+        }
+        Ok(meta) => {
+            log_warn!(
+                "onnxruntime.dll 文件异常（{} 字节），将重新下载",
+                "onnxruntime.dll looks corrupted ({} bytes), will re-download",
+                meta.len()
+            );
+            // Remove the bad file so download_onnxruntime_inner can write fresh
+            let _ = std::fs::remove_file(&dll_path);
+            false
+        }
+        Err(_) => false, // File doesn't exist
     }
 }
 
