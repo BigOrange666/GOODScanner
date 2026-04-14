@@ -10,6 +10,17 @@ fn main() {
         }
         res.set_icon("../assets/icon.ico");
         res.set_manifest_file("../assets/manifest.xml");
+
+        // VS_VERSION_INFO — legitimate apps carry version metadata; its absence
+        // is a negative signal for AV heuristics.
+        let version = env!("CARGO_PKG_VERSION");
+        res.set("ProductName", "GOOD Scanner");
+        res.set("FileDescription", "Genshin Impact GOOD v3 Data Scanner");
+        res.set("ProductVersion", version);
+        res.set("FileVersion", version);
+        res.set("LegalCopyright", "GPL-2.0-or-later");
+        res.set("OriginalFilename", "GOODScanner.exe");
+
         res.compile().unwrap();
     }
 }

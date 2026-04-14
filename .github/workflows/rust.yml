@@ -57,14 +57,19 @@ jobs:
               $pattern.Replace((Get-Content -Raw $file), $ver, 1) | Out-File -FilePath $file
           }
 
-      - name: Build (Release)
-        run: cargo build --release
+      - name: Build GOODScanner (Release)
+        run: cargo build --release --bin GOODScanner
 
-      - name: Upload Build Artifact
+      - name: Build GOODCapture (Release)
+        run: cargo build --release --bin GOODCapture --features capture
+
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: GOODScanner_${{ env.VERSION }}
-          path: target/release/GOODScanner.exe
+          path: |
+            target/release/GOODScanner.exe
+            target/release/GOODCapture.exe
 
       - name: Delete existing release if any
         run: gh release delete $env:VERSION --yes --cleanup-tag 2>$null
@@ -77,5 +82,7 @@ jobs:
         with:
           tag_name: ${{ env.VERSION }}
           name: ${{ env.VERSION }}
-          files: target/release/GOODScanner.exe
+          files: |
+            target/release/GOODScanner.exe
+            target/release/GOODCapture.exe
           make_latest: true
