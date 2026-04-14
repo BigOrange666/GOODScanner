@@ -1327,6 +1327,13 @@ pub fn run_scan_core(
     let game_info = GoodScannerApplication::get_game_info()
         .context("请确认原神已启动、未最小化、且使用16:9分辨率（如1920×1080）\
                  / Ensure Genshin Impact is running, not minimized, and using a 16:9 resolution (e.g. 1920×1080)")?;
+    log_info!(
+        "游戏窗口: {}x{}, 云游戏={}",
+        "Game window: {}x{}, cloud={}",
+        game_info.window.width, game_info.window.height, game_info.is_cloud,
+    );
+
+    report("初始化屏幕截图 / Initializing screen capture...");
     let mut ctrl = GenshinGameController::new(game_info)
         .context("屏幕截图初始化失败 / Screen capture initialization failed")?;
     let token = cancel_token.unwrap_or_else(yas::cancel::CancelToken::new);
@@ -1338,11 +1345,12 @@ pub fn run_scan_core(
     let mut artifacts = None;
 
     // Create shared OCR pools for all scanners
-
+    report("加载OCR模型 / Loading OCR models...");
     let pool_config = OcrPoolConfig::detect();
     let ocr_backend = config.ocr_backend.as_deref().unwrap_or("ppocrv5");
     let substat_backend = config.artifact_substat_ocr.as_str();
     let pools = SharedOcrPools::new(pool_config, ocr_backend, substat_backend)?;
+    log_info!("OCR模型加载完成", "OCR models loaded");
 
     // Scan characters
     if config.scan_characters {
@@ -1450,13 +1458,16 @@ pub fn run_server_core(
     let init_executor = move || -> anyhow::Result<Box<dyn crate::server::ManageExecutor>> {
 
         crate::manager::ui_actions::set_manager_delays(mgr_delays.clone());
+        log_info!("加载OCR模型...", "Loading OCR models...");
         let pool_config = OcrPoolConfig::detect();
         let pools = Arc::new(SharedOcrPools::new(pool_config, &ocr_be, &substat_ocr)
             .context("OCR模型加载失败，请确认内存充足（建议8GB以上）\
                      / OCR model load failed — ensure sufficient memory (8 GB+ recommended)")?);
+        log_info!("查找游戏窗口...", "Finding game window...");
         let game_info = GoodScannerApplication::get_game_info()
             .context("请确认原神已启动、未最小化、且使用16:9分辨率（如1920×1080）\
                      / Ensure Genshin Impact is running, not minimized, and using a 16:9 resolution (e.g. 1920×1080)")?;
+        log_info!("初始化屏幕截图...", "Initializing screen capture...");
         let ctrl = GenshinGameController::new(game_info)
             .context("屏幕截图初始化失败 / Screen capture initialization failed")?;
         let manager = crate::manager::orchestrator::ArtifactManager::new(
