@@ -34,9 +34,17 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::data_cache::load_data_cache;
-use super::data_types::DataCache;
 use super::packet_capture::PacketCapture;
 use super::player_data::{CaptureExportSettings, PlayerData};
+
+// --- Heuristic thresholds for field-number-agnostic packet matching ---
+// These control how many valid sub-messages a repeated field must contain
+// before we accept it as an item/avatar packet. Tuned to avoid false positives
+// while accepting real game data (accounts typically have 100+ items, 20+ avatars).
+const MIN_ITEM_ENTRIES: usize = 10;
+const MIN_GEAR_COUNT: usize = 5; // items with actual weapon/reliquary equip data
+const MIN_AVATAR_ENTRIES: usize = 4;
+const MIN_AVATARS_WITH_PROPS: usize = 2; // avatars with non-empty prop_map
 use crate::scanner::common::models::GoodExport;
 
 /// Commands the UI can send to the monitor.
@@ -119,26 +127,6 @@ impl CaptureMonitor {
             packet_rx,
             dump_packets,
             dump_dir,
-            dump_counter: 0,
-        })
-    }
-
-    /// Initialize with a pre-loaded DataCache (for testing or custom sources).
-    pub fn new_with_data(data_cache: DataCache, state: Arc<Mutex<CaptureState>>) -> Result<Self> {
-        let player_data = PlayerData::new(data_cache);
-        let keys = load_keys()?;
-        let sniffer = GameSniffer::new().set_initial_keys(keys);
-        let (packet_tx, packet_rx) = mpsc::unbounded_channel();
-
-        Ok(Self {
-            player_data,
-            sniffer,
-            state,
-            capture_cancel_token: None,
-            packet_tx,
-            packet_rx,
-            dump_packets: false,
-            dump_dir: crate::cli::exe_dir().join("debug_capture"),
             dump_counter: 0,
         })
     }
@@ -263,22 +251,20 @@ impl CaptureMonitor {
     }
 }
 
-/// Field-number-agnostic item packet detection.
+/// Extract the repeated field with the most entries that parse as `T` and pass
+/// the `filter`.  Returns `(best_field_number, parsed_entries)`.
 ///
-/// Parses the outer message as `Unk` (generic protobuf), iterates all
-/// repeated length-delimited fields, and tries parsing each sub-message as
-/// `Item`.  Accepts the field with the most valid items, provided there are
-/// ≥5 items with actual weapon/reliquary data.
-///
-/// This survives both command ID rotation AND outer field number changes.
-fn try_match_items(proto_data: &[u8]) -> Option<Vec<Item>> {
+/// This is the core of our field-number-agnostic packet matching: parse the
+/// outer message as `Unk` (generic protobuf), group all length-delimited
+/// values by field number, try parsing each group as `T`, and pick the field
+/// with the most valid results.
+fn find_best_field<T: Message>(
+    proto_data: &[u8],
+    min_entries: usize,
+    filter: impl Fn(&T) -> bool,
+) -> Option<(u32, Vec<T>)> {
     let unk = Unk::parse_from_bytes(proto_data).ok()?;
 
-    // Collect items from whichever field yields the most valid ones
-    let mut best: Option<Vec<Item>> = None;
-    let mut best_field = 0u32;
-
-    // Group entries by field number
     let mut field_map: HashMap<u32, Vec<&[u8]>> = HashMap::new();
     for (field_num, value) in unk.unknown_fields().iter() {
         if let UnknownValueRef::LengthDelimited(bytes) = value {
@@ -286,33 +272,44 @@ fn try_match_items(proto_data: &[u8]) -> Option<Vec<Item>> {
         }
     }
 
+    let mut best: Option<(u32, Vec<T>)> = None;
     for (field_num, blobs) in &field_map {
-        if blobs.len() < 10 {
-            continue; // Too few sub-messages to be an item list
+        if blobs.len() < min_entries {
+            continue;
         }
-        let items: Vec<Item> = blobs
+        let parsed: Vec<T> = blobs
             .iter()
-            .filter_map(|b| Item::parse_from_bytes(b).ok())
-            .filter(|item| item.item_id != 0 && item.guid != 0)
+            .filter_map(|b| T::parse_from_bytes(b).ok())
+            .filter(|v| filter(v))
             .collect();
-        if items.len() >= 10 && best.as_ref().map_or(true, |b| items.len() > b.len()) {
-            best = Some(items);
-            best_field = *field_num;
+        if parsed.len() >= min_entries
+            && best.as_ref().map_or(true, |(_, b)| parsed.len() > b.len())
+        {
+            best = Some((*field_num, parsed));
         }
     }
+    best
+}
 
-    let items = best?;
+/// Field-number-agnostic item packet detection.
+///
+/// Survives both command ID rotation AND outer field number changes.
+fn try_match_items(proto_data: &[u8]) -> Option<Vec<Item>> {
+    let (field, items) = find_best_field::<Item>(
+        proto_data,
+        MIN_ITEM_ENTRIES,
+        |item| item.item_id != 0 && item.guid != 0,
+    )?;
+
     let gear_count = items
         .iter()
         .filter(|i| i.has_equip() && (i.equip().has_weapon() || i.equip().has_reliquary()))
         .count();
-    if gear_count < 5 {
+    if gear_count < MIN_GEAR_COUNT {
         log_debug!(
             "物品数据包候选被拒（field={}, {} 个物品，{} 个武器/圣遗物）",
             "Item packet candidate rejected (field={}, {} items, {} weapons/artifacts)",
-            best_field,
-            items.len(),
-            gear_count,
+            field, items.len(), gear_count,
         );
         return None;
     }
@@ -320,59 +317,28 @@ fn try_match_items(proto_data: &[u8]) -> Option<Vec<Item>> {
     log_debug!(
         "物品数据包匹配成功（field={}, {} 个物品）",
         "Item packet matched (field={}, {} items)",
-        best_field,
-        items.len(),
+        field, items.len(),
     );
     Some(items)
 }
 
 /// Field-number-agnostic avatar packet detection.
 ///
-/// Same approach as items: parse as `Unk`, try all repeated fields as
-/// `AvatarInfo`.  Requires ≥4 avatars and ≥2 with non-empty `prop_map`
+/// Requires ≥4 avatars and ≥2 with non-empty `prop_map`
 /// (every real avatar has property entries like level/ascension).
 fn try_match_avatars(proto_data: &[u8]) -> Option<Vec<AvatarInfo>> {
-    let unk = Unk::parse_from_bytes(proto_data).ok()?;
+    let (field, avatars) = find_best_field::<AvatarInfo>(
+        proto_data,
+        MIN_AVATAR_ENTRIES,
+        |a| a.avatar_id != 0 && a.guid != 0,
+    )?;
 
-    let mut best: Option<Vec<AvatarInfo>> = None;
-    let mut best_field = 0u32;
-
-    let mut field_map: HashMap<u32, Vec<&[u8]>> = HashMap::new();
-    for (field_num, value) in unk.unknown_fields().iter() {
-        if let UnknownValueRef::LengthDelimited(bytes) = value {
-            field_map.entry(field_num).or_default().push(bytes);
-        }
-    }
-
-    for (field_num, blobs) in &field_map {
-        if blobs.len() < 4 {
-            continue;
-        }
-        let avatars: Vec<AvatarInfo> = blobs
-            .iter()
-            .filter_map(|b| AvatarInfo::parse_from_bytes(b).ok())
-            .filter(|a| a.avatar_id != 0 && a.guid != 0)
-            .collect();
-        if avatars.len() >= 4 && best.as_ref().map_or(true, |b| avatars.len() > b.len()) {
-            best = Some(avatars);
-            best_field = *field_num;
-        }
-    }
-
-    let avatars = best?;
-
-    // Validate: real avatars have prop_map entries (level, ascension, etc.)
-    let has_props = avatars
-        .iter()
-        .filter(|a| !a.prop_map.is_empty())
-        .count();
-    if has_props < 2 {
+    let has_props = avatars.iter().filter(|a| !a.prop_map.is_empty()).count();
+    if has_props < MIN_AVATARS_WITH_PROPS {
         log_debug!(
             "角色数据包候选被拒（field={}, {} 个角色，仅 {} 个有属性）",
             "Avatar packet candidate rejected (field={}, {} avatars, only {} with props)",
-            best_field,
-            avatars.len(),
-            has_props,
+            field, avatars.len(), has_props,
         );
         return None;
     }
@@ -380,8 +346,7 @@ fn try_match_avatars(proto_data: &[u8]) -> Option<Vec<AvatarInfo>> {
     log_debug!(
         "角色数据包匹配成功（field={}, {} 个角色）",
         "Avatar packet matched (field={}, {} avatars)",
-        best_field,
-        avatars.len(),
+        field, avatars.len(),
     );
     Some(avatars)
 }
@@ -457,4 +422,110 @@ fn load_keys() -> Result<HashMap<u16, Vec<u8>>> {
     }
 
     Ok(all_keys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ITEMS_BIN: &[u8] = include_bytes!("testdata/items.bin");
+    const AVATARS_BIN: &[u8] = include_bytes!("testdata/avatars.bin");
+    const NOISE_BIN: &[u8] = include_bytes!("testdata/noise.bin");
+
+    // --- try_match_items ---
+
+    #[test]
+    fn match_items_on_real_packet() {
+        let items = try_match_items(ITEMS_BIN).expect("should match item packet");
+        // Real account has thousands of items, hundreds of weapons/artifacts
+        assert!(items.len() > 1000, "expected >1000 items, got {}", items.len());
+        let weapons = items.iter().filter(|i| i.has_equip() && i.equip().has_weapon()).count();
+        let artifacts = items.iter().filter(|i| i.has_equip() && i.equip().has_reliquary()).count();
+        assert!(weapons > 50, "expected >50 weapons, got {}", weapons);
+        assert!(artifacts > 50, "expected >50 artifacts, got {}", artifacts);
+    }
+
+    #[test]
+    fn match_items_rejects_avatar_packet() {
+        assert!(try_match_items(AVATARS_BIN).is_none(), "avatar packet should not match as items");
+    }
+
+    #[test]
+    fn match_items_rejects_noise() {
+        assert!(try_match_items(NOISE_BIN).is_none());
+    }
+
+    #[test]
+    fn match_items_rejects_empty() {
+        assert!(try_match_items(&[]).is_none());
+    }
+
+    // --- try_match_avatars ---
+
+    #[test]
+    fn match_avatars_on_real_packet() {
+        let avatars = try_match_avatars(AVATARS_BIN).expect("should match avatar packet");
+        assert!(avatars.len() > 20, "expected >20 avatars, got {}", avatars.len());
+        // All real avatars should have prop_map with level
+        let with_level = avatars.iter().filter(|a| a.prop_map.contains_key(&4001)).count();
+        assert!(with_level > 10, "expected >10 avatars with level prop, got {}", with_level);
+    }
+
+    #[test]
+    fn match_avatars_rejects_item_packet() {
+        assert!(try_match_avatars(ITEMS_BIN).is_none(), "item packet should not match as avatars");
+    }
+
+    #[test]
+    fn match_avatars_rejects_noise() {
+        assert!(try_match_avatars(NOISE_BIN).is_none());
+    }
+
+    #[test]
+    fn match_avatars_rejects_empty() {
+        assert!(try_match_avatars(&[]).is_none());
+    }
+
+    // --- find_best_field ---
+
+    #[test]
+    fn find_best_field_returns_correct_field_number() {
+        // Items are in field 3 for this game version
+        let (field, items) = find_best_field::<Item>(
+            ITEMS_BIN, 10, |i| i.item_id != 0 && i.guid != 0,
+        ).expect("should find items");
+        assert_eq!(field, 3, "items should be in field 3");
+        assert!(items.len() > 1000);
+
+        // Avatars are in field 10 for this game version
+        let (field, avatars) = find_best_field::<AvatarInfo>(
+            AVATARS_BIN, 4, |a| a.avatar_id != 0 && a.guid != 0,
+        ).expect("should find avatars");
+        assert_eq!(field, 10, "avatars should be in field 10");
+        assert!(avatars.len() > 20);
+    }
+
+    #[test]
+    fn find_best_field_respects_min_entries() {
+        // With an impossibly high threshold, nothing should match
+        assert!(find_best_field::<Item>(ITEMS_BIN, 100_000, |_| true).is_none());
+    }
+
+    // --- Cross-contamination: items shouldn't parse as avatars and vice versa ---
+
+    #[test]
+    fn item_data_does_not_produce_valid_avatars() {
+        // Even if we lower thresholds, item blobs shouldn't parse as AvatarInfo
+        // with meaningful data
+        let result = find_best_field::<AvatarInfo>(
+            ITEMS_BIN, 4, |a| a.avatar_id != 0 && a.guid != 0,
+        );
+        // Either None, or if protobuf happens to parse garbage, the prop_map check
+        // in try_match_avatars would reject it
+        if let Some((_, avatars)) = result {
+            let with_props = avatars.iter().filter(|a| !a.prop_map.is_empty()).count();
+            assert!(with_props < MIN_AVATARS_WITH_PROPS,
+                "item data shouldn't produce avatars with valid props");
+        }
+    }
 }

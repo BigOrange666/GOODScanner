@@ -200,3 +200,54 @@ pub fn to_good_key(value: &str) -> String {
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_good_key_basic() {
+        assert_eq!(to_good_key("Furina"), "Furina");
+        assert_eq!(to_good_key("Primordial Jade Cutter"), "PrimordialJadeCutter");
+        assert_eq!(to_good_key("Skyward Harp"), "SkywardHarp");
+    }
+
+    #[test]
+    fn to_good_key_single_word() {
+        assert_eq!(to_good_key("Deathmatch"), "Deathmatch");
+    }
+
+    #[test]
+    fn to_good_key_apostrophe_and_special_chars() {
+        // Non-alphanumeric non-space chars are stripped, no capitalize after them
+        assert_eq!(to_good_key("Hu Tao"), "HuTao");
+    }
+
+    #[test]
+    fn property_good_names() {
+        assert_eq!(Property::Hp.good_name(), "hp");
+        assert_eq!(Property::AttackPercent.good_name(), "atk_");
+        assert_eq!(Property::CritRate.good_name(), "critRate_");
+        assert_eq!(Property::ElementalMastery.good_name(), "eleMas");
+    }
+
+    #[test]
+    fn property_is_percentage() {
+        assert!(!Property::Hp.is_percentage());
+        assert!(!Property::Attack.is_percentage());
+        assert!(!Property::Defense.is_percentage());
+        assert!(!Property::ElementalMastery.is_percentage());
+        assert!(Property::HpPercent.is_percentage());
+        assert!(Property::CritRate.is_percentage());
+        assert!(Property::EnergyRecharge.is_percentage());
+    }
+
+    #[test]
+    fn artifact_slot_good_names() {
+        assert_eq!(ArtifactSlot::Flower.good_name(), "flower");
+        assert_eq!(ArtifactSlot::Plume.good_name(), "plume");
+        assert_eq!(ArtifactSlot::Sands.good_name(), "sands");
+        assert_eq!(ArtifactSlot::Goblet.good_name(), "goblet");
+        assert_eq!(ArtifactSlot::Circlet.good_name(), "circlet");
+    }
+}

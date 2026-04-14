@@ -16,21 +16,10 @@ const DATA_CACHE_PATH: &str = "data/data_cache.json";
 const DATA_CACHE_META_PATH: &str = "data/data_cache_meta.json";
 const DATA_CACHE_TTL_SECS: u64 = 24 * 3600;
 
-/// Unified metadata file written by the old cache_meta module.
-/// Used for one-time migration only.
-const UNIFIED_META_PATH: &str = "data/metadata.json";
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct CacheMeta {
     #[serde(rename = "lastFetchTime")]
     last_fetch_time: u64,
-}
-
-/// Shape of the old unified metadata.json (read-only, for migration).
-#[derive(Deserialize)]
-struct UnifiedMeta {
-    #[serde(default, rename = "dataCacheLastFetchTime")]
-    data_cache_last_fetch_time: u64,
 }
 
 fn now_secs() -> u64 {
@@ -41,26 +30,11 @@ fn now_secs() -> u64 {
 }
 
 fn load_meta() -> CacheMeta {
-    // Try reading the per-file meta
     if let Ok(content) = fs::read_to_string(DATA_CACHE_META_PATH) {
         if let Ok(meta) = serde_json::from_str::<CacheMeta>(&content) {
             return meta;
         }
     }
-
-    // Migrate from unified metadata.json if it exists
-    if let Ok(content) = fs::read_to_string(UNIFIED_META_PATH) {
-        if let Ok(unified) = serde_json::from_str::<UnifiedMeta>(&content) {
-            if unified.data_cache_last_fetch_time > 0 {
-                let meta = CacheMeta {
-                    last_fetch_time: unified.data_cache_last_fetch_time,
-                };
-                write_meta(&meta);
-                return meta;
-            }
-        }
-    }
-
     CacheMeta::default()
 }
 
@@ -71,6 +45,13 @@ fn write_meta(meta: &CacheMeta) {
     if let Ok(json) = serde_json::to_string(meta) {
         let _ = fs::write(DATA_CACHE_META_PATH, json);
     }
+}
+
+/// Delete cached files and re-download immediately.
+pub fn force_refresh() -> Result<()> {
+    let _ = fs::remove_file(DATA_CACHE_META_PATH);
+    let _ = fs::remove_file(DATA_CACHE_PATH);
+    load_data_cache().map(|_| ())
 }
 
 fn is_cache_fresh(last_fetch_time: u64, ttl_secs: u64) -> bool {

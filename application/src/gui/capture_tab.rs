@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
-use super::state::Lang;
+use super::state::{self, Lang};
 
 use yas_genshin::capture::monitor::{CaptureCommand, CaptureState};
 use yas_genshin::capture::player_data::CaptureExportSettings;
@@ -63,6 +63,7 @@ pub struct CaptureTabState {
 
     // Advanced
     pub dump_packets: bool,
+    pub data_cache_refresh: state::RefreshState,
 }
 
 impl CaptureTabState {
@@ -79,6 +80,7 @@ impl CaptureTabState {
             min_weapon_rarity: 3,
             output_dir,
             dump_packets: false,
+            data_cache_refresh: state::RefreshState::Idle,
         }
     }
 
@@ -342,6 +344,33 @@ pub fn show(
                     "Dump all decrypted packets → debug_capture/",
                 ),
             );
+
+            tab.data_cache_refresh.poll();
+            ui.horizontal(|ui| {
+                let busy = tab.data_cache_refresh.is_running();
+                if ui.add_enabled(!busy, egui::Button::new(
+                    l.t("刷新游戏数据缓存", "Refresh game data"),
+                )).clicked() {
+                    tab.data_cache_refresh = state::RefreshState::Running(
+                        std::thread::spawn(|| {
+                            yas_genshin::capture::data_cache::force_refresh()
+                                .map_err(|e| format!("{}", e))
+                        }),
+                    );
+                }
+                match &tab.data_cache_refresh {
+                    state::RefreshState::Ok => {
+                        ui.colored_label(egui::Color32::GREEN, "OK");
+                    }
+                    state::RefreshState::Failed(msg) => {
+                        ui.colored_label(egui::Color32::RED, msg.as_str());
+                    }
+                    state::RefreshState::Running(_) => {
+                        ui.spinner();
+                    }
+                    state::RefreshState::Idle => {}
+                }
+            });
         });
 }
 

@@ -17,7 +17,6 @@ pub enum CaptureError {
     Filter(Error),
     Capture { has_captured: bool, error: Error },
     CaptureClosed,
-    ChannelClosed,
 }
 
 impl Display for CaptureError {
@@ -33,7 +32,6 @@ impl Display for CaptureError {
                 has_captured, error
             ),
             CaptureError::CaptureClosed => write!(f, "Capture closed"),
-            CaptureError::ChannelClosed => write!(f, "Channel closed"),
         }
     }
 }

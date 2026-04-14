@@ -12,6 +12,13 @@ use crate::scanner::common::models::{
 
 use super::data_types::{DataCache, Property, SkillType, to_good_key};
 
+// --- Game-internal property IDs (content IDs, stable within a version) ---
+// These come from the game's `AvatarInfo.prop_map` and may shift across major versions.
+const PROP_LEVEL: u32 = 4001;
+const PROP_ASCENSION: u32 = 1002;
+// `avatar_type == 1` means a formal (playable) character, filtering out trial/test avatars.
+const AVATAR_TYPE_FORMAL: u32 = 1;
+
 /// Settings for filtering exported data.
 #[derive(Clone, Debug)]
 pub struct CaptureExportSettings {
@@ -69,17 +76,9 @@ impl PlayerData {
         }
     }
 
-    pub fn has_characters(&self) -> bool {
-        !self.characters.is_empty()
-    }
-
-    pub fn has_items(&self) -> bool {
-        !self.items.is_empty()
-    }
-
     /// Count characters (formal avatars only, avatar_type == 1).
     pub fn character_count(&self) -> usize {
-        self.characters.iter().filter(|c| c.avatar_type == 1).count()
+        self.characters.iter().filter(|c| c.avatar_type == AVATAR_TYPE_FORMAL).count()
     }
 
     /// Count weapons among captured items.
@@ -158,13 +157,13 @@ impl PlayerData {
             .iter()
             .filter_map(|character| {
                 // Filter to formal avatars only (type 1)
-                if character.avatar_type != 1 {
+                if character.avatar_type != AVATAR_TYPE_FORMAL {
                     return None;
                 }
 
                 let name = self.data_cache.get_character(character.avatar_id)?;
-                let level = character.prop_map.get(&4001).map(|prop| prop.val as u32)?;
-                let ascension = character.prop_map.get(&1002).map(|prop| prop.val as u32)?;
+                let level = character.prop_map.get(&PROP_LEVEL).map(|prop| prop.val as u32)?;
+                let ascension = character.prop_map.get(&PROP_ASCENSION).map(|prop| prop.val as u32)?;
                 let constellation = character.talent_id_list.len() as u32;
 
                 let mut auto = 1u32;
@@ -338,5 +337,77 @@ fn round_stat(property: Property, value: f64) -> f64 {
         (value * 10.0).round() / 10.0
     } else {
         value.round()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_stat_percentage() {
+        assert_eq!(round_stat(Property::CritRate, 3.89), 3.9);
+        assert_eq!(round_stat(Property::CritDamage, 7.75), 7.8);
+        assert_eq!(round_stat(Property::HpPercent, 5.25), 5.3);
+        assert_eq!(round_stat(Property::AttackPercent, 5.24), 5.2);
+    }
+
+    #[test]
+    fn round_stat_flat() {
+        assert_eq!(round_stat(Property::Hp, 298.7), 299.0);
+        assert_eq!(round_stat(Property::Attack, 19.4), 19.0);
+        assert_eq!(round_stat(Property::Defense, 23.5), 24.0);
+        assert_eq!(round_stat(Property::ElementalMastery, 16.3), 16.0);
+    }
+
+    #[test]
+    fn export_default_settings() {
+        let data_cache = DataCache {
+            version: 1,
+            git_hash: String::new(),
+            affix_map: HashMap::new(),
+            artifact_map: HashMap::new(),
+            character_map: HashMap::new(),
+            material_map: HashMap::new(),
+            property_map: HashMap::new(),
+            set_map: HashMap::new(),
+            skill_type_map: HashMap::new(),
+            weapon_map: HashMap::new(),
+        };
+        let player = PlayerData::new(data_cache);
+        let export = player.export(&CaptureExportSettings::default()).unwrap();
+        assert_eq!(export.format, "GOOD");
+        assert_eq!(export.version, 3);
+        // Empty data → empty lists
+        assert_eq!(export.characters.unwrap().len(), 0);
+        assert_eq!(export.weapons.unwrap().len(), 0);
+        assert_eq!(export.artifacts.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn export_respects_include_flags() {
+        let data_cache = DataCache {
+            version: 1,
+            git_hash: String::new(),
+            affix_map: HashMap::new(),
+            artifact_map: HashMap::new(),
+            character_map: HashMap::new(),
+            material_map: HashMap::new(),
+            property_map: HashMap::new(),
+            set_map: HashMap::new(),
+            skill_type_map: HashMap::new(),
+            weapon_map: HashMap::new(),
+        };
+        let player = PlayerData::new(data_cache);
+        let settings = CaptureExportSettings {
+            include_characters: false,
+            include_weapons: false,
+            include_artifacts: true,
+            ..Default::default()
+        };
+        let export = player.export(&settings).unwrap();
+        assert!(export.characters.is_none());
+        assert!(export.weapons.is_none());
+        assert!(export.artifacts.is_some());
     }
 }
