@@ -67,7 +67,24 @@ impl GuiLogger {
 
 impl Log for GuiLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Info
+        if metadata.level() > Level::Info {
+            return false;
+        }
+        // Filter third-party crate info logs — only show warn+ from dependencies.
+        // Our crates (yas, yas_genshin, yas_application) pass through at Info level.
+        if metadata.level() == Level::Info {
+            match metadata.target() {
+                t if t.starts_with("yas")
+                    || t.starts_with("yas_genshin")
+                    || t.starts_with("yas_scanner_genshin")
+                    || t.starts_with("yas_application")
+                    || t.starts_with("yas_core") => true,
+                _ => false,
+            }
+        } else {
+            // Warn and Error from all crates
+            true
+        }
     }
 
     fn log(&self, record: &Record) {
