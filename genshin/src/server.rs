@@ -123,6 +123,10 @@ enum ArtifactCache {
 const ALLOWED_ORIGINS: &[&str] = &[
     "https://ggartifact.com",
     "http://ggartifact.com",
+    "https://127.0.0.1",
+    "http://127.0.0.1",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
 ];
 
 /// Check if an origin is allowed.
@@ -141,6 +145,9 @@ fn is_origin_allowed(origin: &str) -> bool {
         return true;
     }
     if origin == "http://127.0.0.1" || origin.starts_with("http://127.0.0.1:") {
+        return true;
+    }
+    if origin == "http://tauri.localhost" || origin.starts_with("http://tauri.localhost:") {
         return true;
     }
     false
@@ -298,15 +305,26 @@ where
             // If Origin is present but not in the allowlist, reject with 403.
             // If absent, allow (CORS is a browser-enforced mechanism).
             let origin = get_origin(&request);
+            //info!("接收到请求，Origin: {:?}", origin);
             let cors_origin: Option<String> = match &origin {
-                Some(o) if is_origin_allowed(o) => {
-                    Some(o.trim_end_matches('/').to_string())
-                }
                 Some(o) => {
-                    log_warn!("拒绝非法来源: {}", "Rejected disallowed origin: {}", o);
-                    respond_json(request, 403,
-                        r#"{"error":"Origin not allowed"}"#, None);
-                    continue;
+            //      info!("验证来源: {}", o);
+                    if is_origin_allowed(o) {
+                        let cleaned_origin = o.trim_end_matches('/').to_string();
+            //          info!("来源允许: {}", cleaned_origin);
+                        // 对于生产环境，始终返回 https://ggartifact.com 以避免重定向问题
+                        if cleaned_origin == "http://127.0.0.1" {
+            //              info!("检测到本地来源，返回固定来源");
+                            Some("https://ggartifact.com".to_string())
+                        } else {
+                            Some(cleaned_origin)
+                        }
+                    } else {
+                        log_warn!("拒绝非法来源 {}", "Rejected disallowed origin: {}", o);
+                        respond_json(request, 403,
+                            r#"{"error":"Origin not allowed"}"#, None);
+                        continue;
+                    }
                 }
                 None => None,
             };
